@@ -42,14 +42,16 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
         pipeline = self.trainer.pipeline
         input_ids, attention_mask = tokens
 
-        prompt_embeds, prompt_embeds_mask = pipeline.encode_prompt(
-            prompt=None,
-            device=pipeline.device,
-            num_images_per_prompt=1,
-            max_sequence_length=1024,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        # Call the underlying text_encoder directly, as pipeline.encode_prompt expects a string prompt.
+        # The Qwen text_encoder is a Qwen2Model, which returns BaseModelOutputWithPast.
+        # The first element is the last_hidden_state.
+        prompt_embeds = pipeline.text_encoder(
+            input_ids=input_ids.to(pipeline.device),
+            attention_mask=attention_mask.to(pipeline.device),
+        )[0]
+
+        # The prompt_embeds_mask is the attention_mask
+        prompt_embeds_mask = attention_mask
 
         return [prompt_embeds, prompt_embeds_mask]
 
