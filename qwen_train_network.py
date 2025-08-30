@@ -1,6 +1,7 @@
 import argparse
 import torch
 from accelerate import Accelerator
+import copy
 
 from library.device_utils import clean_memory_on_device, init_ipex
 
@@ -35,15 +36,18 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             val_dataset_group.verify_bucket_reso_steps(32)
 
     def load_target_model(self, args, weight_dtype, accelerator):
+        # Store the pipeline for strategies.
+        # Return deep copies of the VAE and UNet to the trainer, to avoid issues
+        # where moving the model to another device corrupts the pipeline's internal state.
         self.pipeline = qwen_utils.load_qwen_pipeline(
             args.pretrained_model_name_or_path,
             weight_dtype,
             "cpu",  # load to cpu to save memory
         )
-        # return the real text encoder, vae and unet
         text_encoder = self.pipeline.text_encoder
-        vae = self.pipeline.vae
-        unet = self.pipeline.transformer
+        vae = copy.deepcopy(self.pipeline.vae)
+        unet = copy.deepcopy(self.pipeline.transformer)
+
         return "qwen-v1", [text_encoder], vae, unet
 
     def get_tokenize_strategy(self, args):
