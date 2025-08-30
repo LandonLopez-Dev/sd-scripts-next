@@ -14,14 +14,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Based on the diffusers documentation, QwenImagePipeline uses a CLIPTokenizer.
-# https://huggingface.co/docs/diffusers/main/api/pipelines/qwenimage
-TOKENIZER_ID = "openai/clip-vit-large-patch14"
-
 
 class QwenTokenizeStrategy(TokenizeStrategy):
     def __init__(self, tokenizer_cache_dir: Optional[str] = None) -> None:
-        self.tokenizer = self._load_tokenizer(CLIPTokenizer, TOKENIZER_ID, tokenizer_cache_dir=tokenizer_cache_dir)
+        # This is a bit of a hack. The Qwen tokenizer is a CLIPTokenizer.
+        # We load it here independently. In the future, it should be passed from the trainer.
+        # For now, this works because the model uses a standard CLIP tokenizer.
+        self.tokenizer = self._load_tokenizer("openai/clip-vit-large-patch14", tokenizer_cache_dir=tokenizer_cache_dir)
 
     def tokenize(self, text: Union[str, List[str]]) -> List[torch.Tensor]:
         text = [text] if isinstance(text, str) else text
@@ -30,8 +29,8 @@ class QwenTokenizeStrategy(TokenizeStrategy):
 
 
 class QwenTextEncodingStrategy(TextEncodingStrategy):
-    def __init__(self, trainer) -> None:
-        self.trainer = trainer
+    def __init__(self) -> None:
+        pass
 
     def encode_tokens(
         self,
@@ -39,15 +38,14 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
         models: List[Any],
         tokens: List[torch.Tensor],
     ) -> List[torch.Tensor]:
-        pipeline = self.trainer.pipeline
+        text_encoder = models[0] # The text encoder is passed in the models list
         input_ids, attention_mask = tokens
 
-        # Call the underlying text_encoder directly, as pipeline.encode_prompt expects a string prompt.
         # The Qwen text_encoder is a Qwen2Model, which returns BaseModelOutputWithPast.
         # The first element is the last_hidden_state.
-        prompt_embeds = pipeline.text_encoder(
-            input_ids=input_ids.to(pipeline.device),
-            attention_mask=attention_mask.to(pipeline.device),
+        prompt_embeds = text_encoder(
+            input_ids=input_ids.to(text_encoder.device),
+            attention_mask=attention_mask.to(text_encoder.device),
         )[0]
 
         # The prompt_embeds_mask is the attention_mask
@@ -61,14 +59,12 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
 
     def __init__(
         self,
-        trainer,
         cache_to_disk: bool,
         batch_size: int,
         skip_disk_cache_validity_check: bool,
         is_partial: bool = False,
     ) -> None:
         super().__init__(cache_to_disk, batch_size, skip_disk_cache_validity_check, is_partial)
-        self.trainer = trainer
 
     def get_outputs_npz_path(self, image_abs_path: str) -> str:
         return os.path.splitext(image_abs_path)[0] + QwenTextEncoderOutputsCachingStrategy.QWEN_TEXT_ENCODER_OUTPUTS_NPZ_SUFFIX
@@ -106,8 +102,7 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
 
         tokens = tokenize_strategy.tokenize(captions)
         with torch.no_grad():
-            # models are not used here, because the pipeline is stored in the trainer.
-            prompt_embeds, prompt_embeds_mask = text_encoding_strategy.encode_tokens(tokenize_strategy, None, tokens)
+            prompt_embeds, prompt_embeds_mask = text_encoding_strategy.encode_tokens(tokenize_strategy, models, tokens)
 
         if prompt_embeds.dtype == torch.bfloat16:
             prompt_embeds = prompt_embeds.float()

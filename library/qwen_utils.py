@@ -6,6 +6,7 @@ from diffusers import (
     AutoencoderKLQwenImage,
     QwenImageTransformer2DModel,
 )
+from transformers import Qwen2Model, CLIPTokenizer
 from PIL import Image
 import numpy as np
 from . import train_util
@@ -17,20 +18,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def load_qwen_pipeline(
-    model_name_or_path,
-    torch_dtype,
-    device,
-):
-    logger.info("Loading QwenImagePipeline")
-    pipeline = QwenImagePipeline.from_pretrained(
+def load_qwen_text_encoder_and_tokenizer(model_name_or_path, torch_dtype, device):
+    logger.info("Loading Qwen2Model (Text Encoder) and CLIPTokenizer")
+    text_encoder = Qwen2Model.from_pretrained(
         model_name_or_path,
-        transformer=None,
-        vae=None,
+        subfolder="text_encoder",
         torch_dtype=torch_dtype,
     )
-    pipeline.to(device)
-    return pipeline
+    tokenizer = CLIPTokenizer.from_pretrained(
+        model_name_or_path,
+        subfolder="tokenizer"
+    )
+    text_encoder.to(device)
+    return text_encoder, tokenizer
 
 
 def load_qwen_vae(
@@ -63,15 +63,21 @@ def load_qwen_transformer(
     return transformer
 
 
-def sample_images(accelerator, args, epoch, global_step, pipeline, vae, unet):
+def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, tokenizer):
     if not args.sample_prompts:
         return
 
     logger.info(f"Generating samples for epoch {epoch} step {global_step}")
 
-    # Attach the trained models to the pipeline for sampling
-    pipeline.vae = vae
-    pipeline.transformer = unet
+    # Create a new pipeline for sampling
+    # We don't need the scheduler from the training arguments, the pipeline will create its own.
+    pipeline = QwenImagePipeline(
+        vae=vae,
+        text_encoder=text_encoder,
+        transformer=unet,
+        tokenizer=tokenizer,
+        scheduler=None, # Will be created internally
+    )
     pipeline.to(accelerator.device)
 
     prompts = train_util.load_prompts(args.sample_prompts)
@@ -106,6 +112,4 @@ def sample_images(accelerator, args, epoch, global_step, pipeline, vae, unet):
             image.save(os.path.join(output_dir, filename))
 
     pipeline.to("cpu")
-    pipeline.vae = None
-    pipeline.transformer = None
     train_util.clean_memory_on_device(accelerator.device)

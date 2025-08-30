@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 class QwenNetworkTrainer(train_network.NetworkTrainer):
     def __init__(self):
         super().__init__()
-        self.vae_scale_factor = 8  # 2 ** len(vae.config.block_out_channels)
-        self.pipeline = None
+        self.vae_scale_factor = 8
+        self.tokenizer = None
 
     def assert_extra_args(self, args, train_dataset_group, val_dataset_group):
         super().assert_extra_args(args, train_dataset_group, val_dataset_group)
@@ -35,33 +35,24 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             val_dataset_group.verify_bucket_reso_steps(32)
 
     def load_target_model(self, args, weight_dtype, accelerator):
-        # Load the pipeline to make it available to strategies
-        self.pipeline = qwen_utils.load_qwen_pipeline(
-            args.pretrained_model_name_or_path,
-            weight_dtype,
-            "cpu",  # load to cpu to save memory
+        text_encoder, tokenizer = qwen_utils.load_qwen_text_encoder_and_tokenizer(
+            args.pretrained_model_name_or_path, weight_dtype, "cpu"
         )
+        vae = qwen_utils.load_qwen_vae(args.pretrained_model_name_or_path, weight_dtype, "cpu")
+        unet = qwen_utils.load_qwen_transformer(args.pretrained_model_name_or_path, weight_dtype, "cpu")
 
-        # Load models independently to align with the canonical pattern
-        text_encoder = self.pipeline.text_encoder
-        vae = qwen_utils.load_qwen_vae(
-            args.pretrained_model_name_or_path,
-            weight_dtype,
-            "cpu",
-        )
-        unet = qwen_utils.load_qwen_transformer(
-            args.pretrained_model_name_or_path,
-            weight_dtype,
-            "cpu",
-        )
+        self.tokenizer = tokenizer
 
         return "qwen-v1", [text_encoder], vae, unet
 
     def get_tokenize_strategy(self, args):
+        # This strategy is now only used for its `_load_tokenizer` method, which is a bit of a hack.
+        # The actual tokenizer is loaded in `load_target_model` and passed to the trainer.
         return strategy_qwen.QwenTokenizeStrategy(args.tokenizer_cache_dir)
 
     def get_tokenizers(self, tokenize_strategy: strategy_qwen.QwenTokenizeStrategy):
-        return [tokenize_strategy.tokenizer]
+        # Return the tokenizer loaded with the text encoder
+        return [self.tokenizer]
 
     def get_latents_caching_strategy(self, args):
         return strategy_qwen.QwenLatentsCachingStrategy(
@@ -69,12 +60,11 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         )
 
     def get_text_encoding_strategy(self, args):
-        return strategy_qwen.QwenTextEncodingStrategy(self)
+        return strategy_qwen.QwenTextEncodingStrategy()
 
     def get_text_encoder_outputs_caching_strategy(self, args):
         if args.cache_text_encoder_outputs:
             return strategy_qwen.QwenTextEncoderOutputsCachingStrategy(
-                self,
                 args.cache_text_encoder_outputs_to_disk,
                 args.text_encoder_batch_size,
                 args.skip_cache_check,
@@ -96,7 +86,6 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             return
 
         if not args.lowram:
-            # Move models to CPU to save memory
             logger.info("move vae and unet to cpu to save memory")
             org_vae_device = vae.device
             org_unet_device = unet.device
@@ -104,18 +93,15 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             unet.to("cpu")
             clean_memory_on_device(accelerator.device)
 
-        # For Qwen, the text_encoder is part of the pipeline, so we move the whole pipeline
-        logger.info("move Qwen pipeline to GPU for text encoding")
-        self.pipeline.to(accelerator.device)
+        text_encoder = text_encoders[0]
+        text_encoder.to(accelerator.device)
 
         with torch.no_grad(), accelerator.autocast():
             dataset.new_cache_text_encoder_outputs(text_encoders, accelerator)
 
         accelerator.wait_for_everyone()
 
-        # Move models back
-        logger.info("move Qwen pipeline back to cpu")
-        self.pipeline.to("cpu")
+        text_encoder.to("cpu")
         clean_memory_on_device(accelerator.device)
 
         if not args.lowram:
@@ -124,15 +110,12 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             unet.to(org_unet_device)
 
     def prepare_text_encoder_grad_ckpt_workaround(self, index, text_encoder):
-        # The base implementation assumes a CLIP-like model with `text_encoder.text_model`.
-        # The text_encoder we use is a Qwen2Model, and its embeddings are at `embed_tokens`.
         if hasattr(text_encoder, "embed_tokens"):
             text_encoder.embed_tokens.requires_grad_(True)
 
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
-        # The generic sampling function is not compatible with Qwen, so we override it.
         logger.info("Generating samples with Qwen-specific pipeline...")
-        qwen_utils.sample_images(accelerator, args, epoch, global_step, self.pipeline, vae, unet)
+        qwen_utils.sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, self.tokenizer)
 
     def get_noise_pred_and_target(
         self,
@@ -191,8 +174,6 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             vae_scale_factor=self.vae_scale_factor,
         )
 
-        # For flow matching, the target is the velocity from noise to data, which is noise - latents.
-        # This is different from standard diffusion models where the target is the noise itself.
         target = noise - latents
         target = target.permute(0, 2, 1, 3, 4)
 
