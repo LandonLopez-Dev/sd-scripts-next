@@ -14,7 +14,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# TODO: check the correct tokenizer
+# Based on the diffusers documentation, QwenImagePipeline uses a CLIPTokenizer.
+# https://huggingface.co/docs/diffusers/main/api/pipelines/qwenimage
 TOKENIZER_ID = "openai/clip-vit-large-patch14"
 
 
@@ -24,7 +25,6 @@ class QwenTokenizeStrategy(TokenizeStrategy):
 
     def tokenize(self, text: Union[str, List[str]]) -> List[torch.Tensor]:
         text = [text] if isinstance(text, str) else text
-        # TODO: check the correct tokenization for Qwen
         tokens = self.tokenizer(text, max_length=1024, padding="max_length", truncation=True, return_tensors="pt")
         return [tokens["input_ids"], tokens["attention_mask"]]
 
@@ -42,7 +42,6 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
         pipeline = models[0]
         input_ids, attention_mask = tokens
 
-        # TODO: check if this is the correct way to get prompt_embeds
         prompt_embeds, prompt_embeds_mask = pipeline.encode_prompt(
             prompt=None,
             device=pipeline.device,

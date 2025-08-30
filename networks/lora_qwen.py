@@ -1,6 +1,6 @@
 import torch
-from library.networks.lora import LoRAModule, LoRANetwork
-
+from .lora import LoRAModule, LoRANetwork
+from typing import List, Optional
 from library.utils import setup_logging
 
 setup_logging()
@@ -13,7 +13,8 @@ class QwenLoRANetwork(LoRANetwork):
     def __init__(self, text_encoder, unet, **kwargs):
         super().__init__(text_encoder, unet, **kwargs)
 
-    def create_modules(self,
+    def create_modules(
+        self,
         is_unet: bool,
         text_encoder_idx: Optional[int],  # None, 1, 2
         root_module: torch.nn.Module,
