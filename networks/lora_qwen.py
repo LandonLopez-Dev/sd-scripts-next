@@ -1,22 +1,78 @@
+import math
 import torch
 from .lora import LoRAModule, LoRANetwork
-from typing import List, Optional
-from library.utils import setup_logging
+from typing import List, Optional, Union, Dict, Type
+from transformers import CLIPTextModel
 
+from library.utils import setup_logging
 setup_logging()
 import logging
-
 logger = logging.getLogger(__name__)
 
 
 class QwenLoRANetwork(LoRANetwork):
-    # Qwen's attention block class name is Qwen2Attention
-    UNET_TARGET_REPLACE_MODULE = ["Qwen2Attention"]
-    TEXT_ENCODER_TARGET_REPLACE_MODULE = ["Qwen2Attention"]
+    def __init__(
+        self,
+        text_encoder: Union[List[CLIPTextModel], CLIPTextModel],
+        unet,
+        multiplier: float = 1.0,
+        lora_dim: int = 4,
+        alpha: float = 1,
+        dropout: Optional[float] = None,
+        rank_dropout: Optional[float] = None,
+        module_dropout: Optional[float] = None,
+        conv_lora_dim: Optional[int] = None,
+        conv_alpha: Optional[float] = None,
+        **kwargs,
+    ):
+        # The original __init__ is complex and contains a nested function that cannot be overridden.
+        # We must copy and modify it directly.
+        super(LoRANetwork, self).__init__() # Call grandparent's init
+        self.multiplier = multiplier
+        self.lora_dim = lora_dim
+        self.alpha = alpha
+        self.conv_lora_dim = conv_lora_dim
+        self.conv_alpha = conv_alpha
+        self.dropout = dropout
+        self.rank_dropout = rank_dropout
+        self.module_dropout = module_dropout
+        self.loraplus_lr_ratio = None
+        self.loraplus_unet_lr_ratio = None
+        self.loraplus_text_encoder_lr_ratio = None
 
-    def __init__(self, text_encoder, unet, **kwargs):
-        # The base LoRANetwork handles a list of text_encoders
-        super().__init__(text_encoder, unet, **kwargs)
+        logger.info(f"create LoRA network. base dim (rank): {lora_dim}, alpha: {alpha}")
+        logger.info(f"neuron dropout: p={self.dropout}, rank dropout: p={self.rank_dropout}, module dropout: p={self.module_dropout}")
+
+        # create module instances
+        def create_modules(prefix, root_module: torch.nn.Module) -> List[LoRAModule]:
+            loras = []
+            for name, module in root_module.named_modules():
+                if module.__class__.__name__ == "Linear":
+                    if "q_proj" in name or "k_proj" in name or "v_proj" in name or "o_proj" in name:
+                        lora_name = prefix + '.' + name.replace('.', '_')
+                        lora = LoRAModule(lora_name, module, self.multiplier, self.lora_dim, self.alpha, self.dropout, self.rank_dropout, self.module_dropout)
+                        loras.append(lora)
+            return loras
+
+        text_encoders = text_encoder if isinstance(text_encoder, list) else [text_encoder]
+
+        self.text_encoder_loras = []
+        for i, te in enumerate(text_encoders):
+            prefix = self.LORA_PREFIX_TEXT_ENCODER
+            if len(text_encoders) > 1:
+                prefix += f"_{i+1}"
+            self.text_encoder_loras.extend(create_modules(prefix, te))
+
+        logger.info(f"create LoRA for Text Encoder: {len(self.text_encoder_loras)} modules.")
+
+        self.unet_loras = create_modules(self.LORA_PREFIX_UNET, unet)
+        logger.info(f"create LoRA for U-Net: {len(self.unet_loras)} modules.")
+
+        # assertion
+        names = set()
+        for lora in self.text_encoder_loras + self.unet_loras:
+            assert lora.lora_name not in names, f"duplicated lora name: {lora.lora_name}"
+            names.add(lora.lora_name)
 
 
 def create_network(
