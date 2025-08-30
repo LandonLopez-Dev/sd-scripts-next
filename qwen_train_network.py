@@ -1,7 +1,6 @@
 import argparse
 import torch
 from accelerate import Accelerator
-import copy
 
 from library.device_utils import clean_memory_on_device, init_ipex
 
@@ -36,17 +35,25 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             val_dataset_group.verify_bucket_reso_steps(32)
 
     def load_target_model(self, args, weight_dtype, accelerator):
-        # Store the pipeline for strategies.
-        # Return deep copies of the VAE and UNet to the trainer, to avoid issues
-        # where moving the model to another device corrupts the pipeline's internal state.
+        # Load the pipeline to make it available to strategies
         self.pipeline = qwen_utils.load_qwen_pipeline(
             args.pretrained_model_name_or_path,
             weight_dtype,
             "cpu",  # load to cpu to save memory
         )
+
+        # Load models independently to align with the canonical pattern
         text_encoder = self.pipeline.text_encoder
-        vae = copy.deepcopy(self.pipeline.vae)
-        unet = copy.deepcopy(self.pipeline.transformer)
+        vae = qwen_utils.load_qwen_vae(
+            args.pretrained_model_name_or_path,
+            weight_dtype,
+            "cpu",
+        )
+        unet = qwen_utils.load_qwen_transformer(
+            args.pretrained_model_name_or_path,
+            weight_dtype,
+            "cpu",
+        )
 
         return "qwen-v1", [text_encoder], vae, unet
 
@@ -88,21 +95,33 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         if not args.cache_text_encoder_outputs:
             return
 
-        logger.info("Caching text encoder outputs by QwenNetworkTrainer...")
+        if not args.lowram:
+            # Move models to CPU to save memory
+            logger.info("move vae and unet to cpu to save memory")
+            org_vae_device = vae.device
+            org_unet_device = unet.device
+            vae.to("cpu")
+            unet.to("cpu")
+            clean_memory_on_device(accelerator.device)
 
-        # Move the pipeline to GPU for encoding
-        logger.info("Moving pipeline to GPU for text encoding.")
-        self.pipeline.to(accelerator.device, dtype=weight_dtype)
+        # For Qwen, the text_encoder is part of the pipeline, so we move the whole pipeline
+        logger.info("move Qwen pipeline to GPU for text encoding")
+        self.pipeline.to(accelerator.device)
 
         with torch.no_grad(), accelerator.autocast():
             dataset.new_cache_text_encoder_outputs(text_encoders, accelerator)
 
         accelerator.wait_for_everyone()
 
-        # Move the pipeline back to CPU
-        logger.info("Moving pipeline back to CPU.")
+        # Move models back
+        logger.info("move Qwen pipeline back to cpu")
         self.pipeline.to("cpu")
         clean_memory_on_device(accelerator.device)
+
+        if not args.lowram:
+            logger.info("move vae and unet back to original device")
+            vae.to(org_vae_device)
+            unet.to(org_unet_device)
 
     def get_noise_pred_and_target(
         self,
