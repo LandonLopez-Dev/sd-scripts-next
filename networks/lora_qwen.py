@@ -10,33 +10,13 @@ logger = logging.getLogger(__name__)
 
 
 class QwenLoRANetwork(LoRANetwork):
-    def __init__(self, text_encoder, unet, **kwargs):
-        # text_encoder is a pipeline. get the text_encoder model from it
-        if hasattr(text_encoder, "text_encoder"):
-            actual_text_encoder = text_encoder.text_encoder
-        else:
-            actual_text_encoder = text_encoder
-        super().__init__(actual_text_encoder, unet, **kwargs)
+    # Qwen's attention block class name is Qwen2Attention
+    UNET_TARGET_REPLACE_MODULE = ["Qwen2Attention"]
+    TEXT_ENCODER_TARGET_REPLACE_MODULE = ["Qwen2Attention"]
 
-    def create_modules(
-        self,
-        is_unet: bool,
-        text_encoder_idx: Optional[int],  # None, 1, 2
-        root_module: torch.nn.Module,
-        target_replace_modules: List[torch.nn.Module],
-    ) -> List[LoRAModule]:
-        prefix = self.LORA_PREFIX_UNET if is_unet else self.LORA_PREFIX_TEXT_ENCODER
-        loras = []
-        for name, module in root_module.named_modules():
-            if module.__class__.__name__ in target_replace_modules:
-                for child_name, child_module in module.named_modules():
-                    if child_module.__class__.__name__ == "Linear":
-                        if child_name in ["to_k", "to_q", "to_v"] or child_name.endswith("to_out.0"):
-                            lora_name = prefix + "." + name + "." + child_name
-                            lora_name = lora_name.replace(".", "_")
-                            lora = LoRAModule(lora_name, child_module, self.multiplier, self.lora_dim, self.alpha)
-                            loras.append(lora)
-        return loras
+    def __init__(self, text_encoder, unet, **kwargs):
+        # The base LoRANetwork handles a list of text_encoders
+        super().__init__(text_encoder, unet, **kwargs)
 
 
 def create_network(
