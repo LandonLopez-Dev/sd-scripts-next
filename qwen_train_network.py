@@ -123,6 +123,12 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             vae.to(org_vae_device)
             unet.to(org_unet_device)
 
+    def prepare_text_encoder_grad_ckpt_workaround(self, index, text_encoder):
+        # The base implementation assumes a CLIP-like model with `text_encoder.text_model`.
+        # The text_encoder we use is a Qwen2Model, and its embeddings are at `embed_tokens`.
+        if hasattr(text_encoder, "embed_tokens"):
+            text_encoder.embed_tokens.requires_grad_(True)
+
     def get_noise_pred_and_target(
         self,
         args,
