@@ -24,6 +24,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
     def __init__(self):
         super().__init__()
         self.vae_scale_factor = 8  # 2 ** len(vae.config.block_out_channels)
+        self.pipeline = None
 
     def assert_extra_args(self, args, train_dataset_group, val_dataset_group):
         super().assert_extra_args(args, train_dataset_group, val_dataset_group)
@@ -34,23 +35,16 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             val_dataset_group.verify_bucket_reso_steps(32)
 
     def load_target_model(self, args, weight_dtype, accelerator):
-        # text_encoder is the pipeline
-        text_encoder = qwen_utils.load_qwen_pipeline(
+        self.pipeline = qwen_utils.load_qwen_pipeline(
             args.pretrained_model_name_or_path,
             weight_dtype,
             "cpu",  # load to cpu to save memory
         )
-        vae = qwen_utils.load_qwen_vae(
-            args.pretrained_model_name_or_path,
-            weight_dtype,
-            "cpu",
-        )
-        unet = qwen_utils.load_qwen_transformer(
-            args.pretrained_model_name_or_path,
-            weight_dtype,
-            "cpu",
-        )
-        return "qwen-v1", text_encoder, vae, unet
+        # return the real text encoder, vae and unet
+        text_encoder = self.pipeline.text_encoder
+        vae = self.pipeline.vae
+        unet = self.pipeline.transformer
+        return "qwen-v1", [text_encoder], vae, unet
 
     def get_tokenize_strategy(self, args):
         return strategy_qwen.QwenTokenizeStrategy(args.tokenizer_cache_dir)
@@ -64,11 +58,12 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         )
 
     def get_text_encoding_strategy(self, args):
-        return strategy_qwen.QwenTextEncodingStrategy()
+        return strategy_qwen.QwenTextEncodingStrategy(self)
 
     def get_text_encoder_outputs_caching_strategy(self, args):
         if args.cache_text_encoder_outputs:
             return strategy_qwen.QwenTextEncoderOutputsCachingStrategy(
+                self,
                 args.cache_text_encoder_outputs_to_disk,
                 args.text_encoder_batch_size,
                 args.skip_cache_check,

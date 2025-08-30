@@ -30,8 +30,8 @@ class QwenTokenizeStrategy(TokenizeStrategy):
 
 
 class QwenTextEncodingStrategy(TextEncodingStrategy):
-    def __init__(self) -> None:
-        pass
+    def __init__(self, trainer) -> None:
+        self.trainer = trainer
 
     def encode_tokens(
         self,
@@ -39,7 +39,7 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
         models: List[Any],
         tokens: List[torch.Tensor],
     ) -> List[torch.Tensor]:
-        pipeline = models[0]
+        pipeline = self.trainer.pipeline
         input_ids, attention_mask = tokens
 
         prompt_embeds, prompt_embeds_mask = pipeline.encode_prompt(
@@ -59,12 +59,14 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
 
     def __init__(
         self,
+        trainer,
         cache_to_disk: bool,
         batch_size: int,
         skip_disk_cache_validity_check: bool,
         is_partial: bool = False,
     ) -> None:
         super().__init__(cache_to_disk, batch_size, skip_disk_cache_validity_check, is_partial)
+        self.trainer = trainer
 
     def get_outputs_npz_path(self, image_abs_path: str) -> str:
         return os.path.splitext(image_abs_path)[0] + QwenTextEncoderOutputsCachingStrategy.QWEN_TEXT_ENCODER_OUTPUTS_NPZ_SUFFIX
@@ -102,7 +104,8 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
 
         tokens = tokenize_strategy.tokenize(captions)
         with torch.no_grad():
-            prompt_embeds, prompt_embeds_mask = text_encoding_strategy.encode_tokens(tokenize_strategy, models, tokens)
+            # models are not used here, because the pipeline is stored in the trainer.
+            prompt_embeds, prompt_embeds_mask = text_encoding_strategy.encode_tokens(tokenize_strategy, None, tokens)
 
         if prompt_embeds.dtype == torch.bfloat16:
             prompt_embeds = prompt_embeds.float()
