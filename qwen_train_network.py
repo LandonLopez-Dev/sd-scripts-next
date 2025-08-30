@@ -82,6 +82,28 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             subfolder="scheduler",
         )
 
+    def cache_text_encoder_outputs_if_needed(
+        self, args, accelerator: Accelerator, unet, vae, text_encoders, dataset: train_util.DatasetGroup, weight_dtype
+    ):
+        if not args.cache_text_encoder_outputs:
+            return
+
+        logger.info("Caching text encoder outputs by QwenNetworkTrainer...")
+
+        # Move the pipeline to GPU for encoding
+        logger.info("Moving pipeline to GPU for text encoding.")
+        self.pipeline.to(accelerator.device, dtype=weight_dtype)
+
+        with torch.no_grad(), accelerator.autocast():
+            dataset.new_cache_text_encoder_outputs(text_encoders, accelerator)
+
+        accelerator.wait_for_everyone()
+
+        # Move the pipeline back to CPU
+        logger.info("Moving pipeline back to CPU.")
+        self.pipeline.to("cpu")
+        clean_memory_on_device(accelerator.device)
+
     def get_noise_pred_and_target(
         self,
         args,
