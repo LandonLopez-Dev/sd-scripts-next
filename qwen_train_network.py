@@ -132,7 +132,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
         # The generic sampling function is not compatible with Qwen, so we override it.
         logger.info("Generating samples with Qwen-specific pipeline...")
-        qwen_utils.sample_images(accelerator, args, epoch, global_step, self.pipeline)
+        qwen_utils.sample_images(accelerator, args, epoch, global_step, self.pipeline, vae, unet)
 
     def get_noise_pred_and_target(
         self,

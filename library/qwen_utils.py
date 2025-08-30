@@ -63,12 +63,15 @@ def load_qwen_transformer(
     return transformer
 
 
-def sample_images(accelerator, args, epoch, global_step, pipeline):
+def sample_images(accelerator, args, epoch, global_step, pipeline, vae, unet):
     if not args.sample_prompts:
         return
 
     logger.info(f"Generating samples for epoch {epoch} step {global_step}")
 
+    # Attach the trained models to the pipeline for sampling
+    pipeline.vae = vae
+    pipeline.transformer = unet
     pipeline.to(accelerator.device)
 
     prompts = train_util.load_prompts(args.sample_prompts)
@@ -103,4 +106,6 @@ def sample_images(accelerator, args, epoch, global_step, pipeline):
             image.save(os.path.join(output_dir, filename))
 
     pipeline.to("cpu")
+    pipeline.vae = None
+    pipeline.transformer = None
     train_util.clean_memory_on_device(accelerator.device)
