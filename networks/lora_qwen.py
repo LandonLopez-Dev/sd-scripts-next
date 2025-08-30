@@ -41,6 +41,7 @@ def create_network(
     vae,
     text_encoder,
     unet,
+    neuron_dropout=None,
     **kwargs,
 ):
     if network_dim is None:
@@ -54,6 +55,7 @@ def create_network(
         multiplier=multiplier,
         lora_dim=network_dim,
         alpha=network_alpha,
+        dropout=neuron_dropout,
         **kwargs,
     )
     return network
