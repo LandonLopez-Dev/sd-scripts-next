@@ -27,6 +27,8 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
 
     def assert_extra_args(self, args, train_dataset_group, val_dataset_group):
         super().assert_extra_args(args, train_dataset_group, val_dataset_group)
+        if not args.network_train_unet_only:
+            logger.warning("Qwen LoRA does not support text encoder training yet. Please use --network_train_unet_only.")
         train_dataset_group.verify_bucket_reso_steps(32)
         if val_dataset_group is not None:
             val_dataset_group.verify_bucket_reso_steps(32)
@@ -138,6 +140,8 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             vae_scale_factor=self.vae_scale_factor,
         )
 
+        # For flow matching, the target is the velocity from noise to data, which is noise - latents.
+        # This is different from standard diffusion models where the target is the noise itself.
         target = noise - latents
         target = target.permute(0, 2, 1, 3, 4)
 

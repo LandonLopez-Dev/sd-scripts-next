@@ -11,7 +11,12 @@ logger = logging.getLogger(__name__)
 
 class QwenLoRANetwork(LoRANetwork):
     def __init__(self, text_encoder, unet, **kwargs):
-        super().__init__(text_encoder, unet, **kwargs)
+        # text_encoder is a pipeline. get the text_encoder model from it
+        if hasattr(text_encoder, "text_encoder"):
+            actual_text_encoder = text_encoder.text_encoder
+        else:
+            actual_text_encoder = text_encoder
+        super().__init__(actual_text_encoder, unet, **kwargs)
 
     def create_modules(
         self,
