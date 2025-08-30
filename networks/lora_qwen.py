@@ -74,6 +74,9 @@ class QwenLoRANetwork(LoRANetwork):
             assert lora.lora_name not in names, f"duplicated lora name: {lora.lora_name}"
             names.add(lora.lora_name)
 
+        self.block_lr_weight = None
+        self.block_lr = False
+
 
 def create_network(
     multiplier,
