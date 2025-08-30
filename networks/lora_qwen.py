@@ -49,7 +49,7 @@ class QwenLoRANetwork(LoRANetwork):
             for name, module in root_module.named_modules():
                 if module.__class__.__name__ == "Linear":
                     if "q_proj" in name or "k_proj" in name or "v_proj" in name or "o_proj" in name:
-                        lora_name = prefix + '.' + name.replace('.', '_')
+                        lora_name = prefix + '_' + name.replace('.', '_')
                         lora = LoRAModule(lora_name, module, self.multiplier, self.lora_dim, self.alpha, self.dropout, self.rank_dropout, self.module_dropout)
                         loras.append(lora)
             return loras
