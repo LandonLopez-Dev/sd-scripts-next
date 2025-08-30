@@ -1,9 +1,14 @@
+import os
+import random
 import torch
 from diffusers import (
     QwenImagePipeline,
     AutoencoderKLQwenImage,
     QwenImageTransformer2DModel,
 )
+from PIL import Image
+import numpy as np
+from .. import train_util
 from library.utils import setup_logging
 
 setup_logging()
@@ -56,3 +61,43 @@ def load_qwen_transformer(
     )
     transformer.to(device)
     return transformer
+
+
+def sample_images(accelerator, args, epoch, global_step, pipeline):
+    if not args.sample_prompts:
+        return
+
+    logger.info(f"Generating samples for epoch {epoch} step {global_step}")
+
+    pipeline.to(accelerator.device)
+
+    prompts = train_util.load_prompts(args.sample_prompts)
+    with torch.no_grad(), accelerator.autocast():
+        for i, prompt_data in enumerate(prompts):
+            prompt = prompt_data.get("prompt", "")
+            negative_prompt = prompt_data.get("negative_prompt", "")
+            seed = prompt_data.get("seed")
+            if seed is None:
+                seed = random.randint(0, 2**32 - 1)
+
+            generator = torch.Generator(device=accelerator.device).manual_seed(seed)
+
+            logger.info(f"Generating image for prompt: {prompt}")
+
+            image = pipeline(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                num_inference_steps=args.sample_steps,
+                guidance_scale=args.sample_guidance_scale,
+                generator=generator
+            ).images[0]
+
+            # save image
+            output_dir = os.path.join(args.output_dir, "sample")
+            os.makedirs(output_dir, exist_ok=True)
+
+            filename = f"epoch-{epoch:06d}-step-{global_step:06d}-{i:02d}-{seed}.png"
+            image.save(os.path.join(output_dir, filename))
+
+    pipeline.to("cpu")
+    train_util.clean_memory_on_device(accelerator.device)

@@ -129,6 +129,11 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         if hasattr(text_encoder, "embed_tokens"):
             text_encoder.embed_tokens.requires_grad_(True)
 
+    def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizer, text_encoder, unet):
+        # The generic sampling function is not compatible with Qwen, so we override it.
+        logger.info("Generating samples with Qwen-specific pipeline...")
+        qwen_utils.sample_images(accelerator, args, epoch, global_step, self.pipeline)
+
     def get_noise_pred_and_target(
         self,
         args,
