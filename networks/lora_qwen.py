@@ -49,6 +49,13 @@ def create_network(
     if network_alpha is None:
         network_alpha = network_dim
 
+    # get dropout argument
+    if neuron_dropout is None:
+        neuron_dropout = kwargs.pop('dropout', None)
+    else:
+        # neuron_dropout has priority, so remove dropout from kwargs
+        kwargs.pop('dropout', None)
+
     network = QwenLoRANetwork(
         text_encoder,
         unet,
