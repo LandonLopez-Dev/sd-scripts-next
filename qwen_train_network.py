@@ -38,7 +38,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         text_encoder, tokenizer = qwen_utils.load_qwen_text_encoder_and_tokenizer(
             args.pretrained_model_name_or_path, weight_dtype, "cpu"
         )
-        vae = qwen_utils.load_qwen_vae(args.pretrained_model_name_or_path, weight_dtype, "cpu")
+        vae = qwen_utils.load_qwen_vae(args.pretrained_model_name_or_path, weight_dtype, "cpu", custom_vae_path=args.vae)
         unet = qwen_utils.load_qwen_transformer(args.pretrained_model_name_or_path, weight_dtype, "cpu")
 
         self.tokenizer = tokenizer

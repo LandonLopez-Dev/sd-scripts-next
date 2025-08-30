@@ -37,11 +37,15 @@ def load_qwen_vae(
     model_name_or_path,
     torch_dtype,
     device,
+    custom_vae_path=None,
 ):
-    logger.info("Loading AutoencoderKLQwenImage")
+    vae_path = custom_vae_path if custom_vae_path is not None else model_name_or_path
+    subfolder = "vae" if custom_vae_path is None else None
+
+    logger.info(f"Loading AutoencoderKLQwenImage from: {vae_path}")
     vae = AutoencoderKLQwenImage.from_pretrained(
-        model_name_or_path,
-        subfolder="vae",
+        vae_path,
+        subfolder=subfolder,
         torch_dtype=torch_dtype,
     )
     vae.to(device)
