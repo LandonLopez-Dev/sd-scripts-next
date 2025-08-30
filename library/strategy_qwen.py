@@ -152,7 +152,7 @@ class QwenLatentsCachingStrategy(LatentsCachingStrategy):
         return self._default_load_latents_from_disk(8, npz_path, bucket_reso)  # support multi-resolution
 
     def cache_batch_latents(self, vae, image_infos: List, flip_aug: bool, alpha_mask: bool, random_crop: bool):
-        encode_by_vae = lambda img_tensor: vae.encode(img_tensor).latent_dist.sample().to("cpu")
+        encode_by_vae = lambda img_tensor: vae.encode(img_tensor.unsqueeze(2)).latent_dist.sample().to("cpu")
         vae_device = vae.device
         vae_dtype = vae.dtype
 
