@@ -8,7 +8,7 @@ from diffusers import (
 )
 from PIL import Image
 import numpy as np
-from .. import train_util
+from . import train_util
 from library.utils import setup_logging
 
 setup_logging()
