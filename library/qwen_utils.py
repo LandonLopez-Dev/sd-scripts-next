@@ -84,11 +84,14 @@ def sample_images(accelerator, args, epoch, global_step, pipeline):
 
             logger.info(f"Generating image for prompt: {prompt}")
 
+            steps = prompt_data.get("steps", 30)
+            guidance_scale = prompt_data.get("guidance_scale", 7.5)
+
             image = pipeline(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
-                num_inference_steps=args.sample_steps,
-                guidance_scale=args.sample_guidance_scale,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
                 generator=generator
             ).images[0]
 
