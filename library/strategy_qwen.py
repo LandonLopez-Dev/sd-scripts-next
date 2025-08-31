@@ -98,7 +98,7 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         self, tokenize_strategy: TokenizeStrategy, models: List[Any], text_encoding_strategy: TextEncodingStrategy, infos: List
     ):
         # Filter out None or empty captions and corresponding infos
-        valid_infos = [info for info in infos if info.caption]
+        valid_infos = [info for info in infos if info.caption is not None and info.caption.strip() != ""]
         if not valid_infos:
             return
 
