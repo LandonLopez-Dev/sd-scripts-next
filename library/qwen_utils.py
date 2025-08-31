@@ -89,8 +89,8 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
     prompts = train_util.load_prompts(args.sample_prompts)
     with torch.no_grad(), accelerator.autocast():
         for i, prompt_data in enumerate(prompts):
-            prompt = prompt_data.get("prompt", "")
-            negative_prompt = prompt_data.get("negative_prompt", "")
+            prompt = prompt_data.get("prompt")
+            negative_prompt = prompt_data.get("negative_prompt")
             seed = prompt_data.get("seed")
             if seed is None:
                 seed = random.randint(0, 2**32 - 1)
