@@ -16,10 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 class QwenTokenizeStrategy(TokenizeStrategy):
-    def __init__(self, tokenizer_cache_dir: Optional[str] = None) -> None:
-        # The Qwen model uses a standard CLIPTokenizer.
-        # We pass the class and the model_id to the base loader method.
-        self.tokenizer = self._load_tokenizer(CLIPTokenizer, "openai/clip-vit-large-patch14", tokenizer_cache_dir=tokenizer_cache_dir)
+    def __init__(self, model_name_or_path: str, tokenizer_cache_dir: Optional[str] = None) -> None:
+        # The Qwen model uses a standard CLIPTokenizer but with a specific vocab file.
+        # We load it from the `tokenizer` subfolder of the user's provided model path.
+        self.tokenizer = CLIPTokenizer.from_pretrained(model_name_or_path, subfolder="tokenizer", cache_dir=tokenizer_cache_dir)
 
     def tokenize(self, text: Union[str, List[str]]) -> List[torch.Tensor]:
         text = [text] if isinstance(text, str) else text

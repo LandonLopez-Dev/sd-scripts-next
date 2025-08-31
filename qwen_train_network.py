@@ -43,7 +43,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         return "qwen-v1", [text_encoder], vae, unet
 
     def get_tokenize_strategy(self, args):
-        return strategy_qwen.QwenTokenizeStrategy(args.tokenizer_cache_dir)
+        return strategy_qwen.QwenTokenizeStrategy(args.pretrained_model_name_or_path, args.tokenizer_cache_dir)
 
     def get_tokenizers(self, tokenize_strategy: strategy_qwen.QwenTokenizeStrategy):
         return [tokenize_strategy.tokenizer]
