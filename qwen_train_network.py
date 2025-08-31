@@ -36,7 +36,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
 
     def load_target_model(self, args, weight_dtype, accelerator):
         text_encoder, tokenizer = qwen_utils.load_qwen_text_encoder_and_tokenizer(
-            args.pretrained_model_name_or_path, weight_dtype, "cpu"
+            args.pretrained_model_name_or_path, weight_dtype, "cpu", custom_text_encoder_path=args.text_encoder_path
         )
         vae = qwen_utils.load_qwen_vae(args.pretrained_model_name_or_path, weight_dtype, "cpu", custom_vae_path=args.vae)
         unet = qwen_utils.load_qwen_transformer(args.pretrained_model_name_or_path, weight_dtype, "cpu")
@@ -183,6 +183,12 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
 def setup_parser() -> argparse.ArgumentParser:
     parser = train_network.setup_parser()
     train_util.add_dit_training_arguments(parser)
+    parser.add_argument(
+        "--text_encoder_path",
+        type=str,
+        default=None,
+        help="path to the text encoder model to use, if different from the main model",
+    )
     return parser
 
 

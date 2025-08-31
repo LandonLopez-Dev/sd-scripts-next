@@ -18,16 +18,22 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def load_qwen_text_encoder_and_tokenizer(model_name_or_path, torch_dtype, device):
-    logger.info("Loading Qwen2Model (Text Encoder) and CLIPTokenizer")
+def load_qwen_text_encoder_and_tokenizer(model_name_or_path, torch_dtype, device, custom_text_encoder_path=None):
+    text_encoder_path = custom_text_encoder_path if custom_text_encoder_path is not None else model_name_or_path
+    text_encoder_subfolder = "text_encoder" if custom_text_encoder_path is None else None
+    tokenizer_subfolder = "tokenizer" if custom_text_encoder_path is None else None
+
+    logger.info(f"Loading Qwen2Model (Text Encoder) from: {text_encoder_path}")
     text_encoder = Qwen2Model.from_pretrained(
-        model_name_or_path,
-        subfolder="text_encoder",
+        text_encoder_path,
+        subfolder=text_encoder_subfolder,
         torch_dtype=torch_dtype,
     )
+
+    logger.info(f"Loading CLIPTokenizer from: {text_encoder_path}")
     tokenizer = CLIPTokenizer.from_pretrained(
-        model_name_or_path,
-        subfolder="tokenizer"
+        text_encoder_path,
+        subfolder=tokenizer_subfolder
     )
     text_encoder.to(device)
     return text_encoder, tokenizer
