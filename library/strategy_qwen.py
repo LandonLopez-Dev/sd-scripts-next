@@ -97,7 +97,13 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
     def cache_batch_outputs(
         self, tokenize_strategy: TokenizeStrategy, models: List[Any], text_encoding_strategy: TextEncodingStrategy, infos: List
     ):
-        captions = [info.caption for info in infos]
+        # captions may be None if the image has no caption file
+        # Filter out None captions and corresponding infos
+        valid_infos = [info for info in infos if info.caption is not None]
+        if not valid_infos:
+            return
+
+        captions = [info.caption for info in valid_infos]
 
         tokens = tokenize_strategy.tokenize(captions)
         with torch.no_grad():
@@ -111,7 +117,7 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         prompt_embeds = prompt_embeds.cpu().numpy()
         prompt_embeds_mask = prompt_embeds_mask.cpu().numpy()
 
-        for i, info in enumerate(infos):
+        for i, info in enumerate(valid_infos):
             prompt_embeds_i = prompt_embeds[i]
             prompt_embeds_mask_i = prompt_embeds_mask[i]
 
