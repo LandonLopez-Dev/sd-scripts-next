@@ -2,7 +2,7 @@ import os
 from typing import Any, List, Optional, Tuple, Union
 import torch
 import numpy as np
-from transformers import CLIPTokenizer
+from transformers import AutoTokenizer
 
 from library import train_util
 from library.strategy_base import LatentsCachingStrategy, TextEncodingStrategy, TokenizeStrategy, TextEncoderOutputsCachingStrategy
@@ -19,7 +19,7 @@ class QwenTokenizeStrategy(TokenizeStrategy):
     def __init__(self, model_name_or_path: str, tokenizer_cache_dir: Optional[str] = None) -> None:
         # The Qwen model uses a standard CLIPTokenizer but with a specific vocab file.
         # We load it from the `tokenizer` subfolder of the user's provided model path.
-        self.tokenizer = CLIPTokenizer.from_pretrained(model_name_or_path, subfolder="tokenizer", cache_dir=tokenizer_cache_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, subfolder="tokenizer", cache_dir=tokenizer_cache_dir)
 
     def tokenize(self, text: Union[str, List[str]]) -> List[torch.Tensor]:
         text = [text] if isinstance(text, str) else text
