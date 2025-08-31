@@ -5,6 +5,7 @@ from diffusers import (
     QwenImagePipeline,
     AutoencoderKLQwenImage,
     QwenImageTransformer2DModel,
+    FlowMatchEulerDiscreteScheduler,
 )
 from transformers import Qwen2Model, CLIPTokenizer
 from PIL import Image
@@ -73,12 +74,15 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
     logger.info(f"Generating samples for epoch {epoch} step {global_step}")
 
     # Create a new pipeline for sampling from the standalone components
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+        args.pretrained_model_name_or_path, subfolder="scheduler"
+    )
     pipeline = QwenImagePipeline(
         vae=vae,
         text_encoder=text_encoder,
         transformer=unet,
         tokenizer=tokenizer,
-        scheduler=None,  # Let the pipeline create a default scheduler
+        scheduler=scheduler,
     )
     pipeline.to(accelerator.device)
 
