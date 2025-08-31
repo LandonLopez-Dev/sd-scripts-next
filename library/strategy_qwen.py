@@ -97,9 +97,8 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
     def cache_batch_outputs(
         self, tokenize_strategy: TokenizeStrategy, models: List[Any], text_encoding_strategy: TextEncodingStrategy, infos: List
     ):
-        # captions may be None if the image has no caption file
-        # Filter out None captions and corresponding infos
-        valid_infos = [info for info in infos if info.caption is not None]
+        # Filter out None or empty captions and corresponding infos
+        valid_infos = [info for info in infos if info.caption]
         if not valid_infos:
             return
 
