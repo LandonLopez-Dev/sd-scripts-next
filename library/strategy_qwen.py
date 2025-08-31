@@ -17,12 +17,12 @@ logger = logging.getLogger(__name__)
 
 class QwenTokenizeStrategy(TokenizeStrategy):
     def __init__(self, tokenizer_cache_dir: Optional[str] = None) -> None:
-        # The actual tokenizer is loaded in the trainer and passed to the methods that need it.
-        # This strategy is just a placeholder to satisfy the type hints of the base framework.
-        self.tokenizer = None
+        self.tokenizer = self._load_tokenizer(CLIPTokenizer, "openai/clip-vit-large-patch14", tokenizer_cache_dir=tokenizer_cache_dir)
 
     def tokenize(self, text: Union[str, List[str]]) -> List[torch.Tensor]:
-        raise NotImplementedError("QwenTokenizeStrategy is a placeholder and should not be used directly for tokenization.")
+        text = [text] if isinstance(text, str) else text
+        tokens = self.tokenizer(text, max_length=1024, padding="max_length", truncation=True, return_tensors="pt")
+        return [tokens["input_ids"], tokens["attention_mask"]]
 
 
 class QwenTextEncodingStrategy(TextEncodingStrategy):
