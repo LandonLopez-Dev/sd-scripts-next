@@ -17,17 +17,16 @@ logger = logging.getLogger(__name__)
 
 class QwenTokenizeStrategy(TokenizeStrategy):
     def __init__(self, tokenizer_cache_dir: Optional[str] = None) -> None:
-        self.tokenizer = self._load_tokenizer(CLIPTokenizer, "openai/clip-vit-large-patch14", tokenizer_cache_dir=tokenizer_cache_dir)
+        # This strategy is a placeholder. The actual tokenizer is loaded by the trainer.
+        self.tokenizer = None
 
     def tokenize(self, text: Union[str, List[str]]) -> List[torch.Tensor]:
-        text = [text] if isinstance(text, str) else text
-        tokens = self.tokenizer(text, max_length=1024, padding="max_length", truncation=True, return_tensors="pt")
-        return [tokens["input_ids"], tokens["attention_mask"]]
+        raise NotImplementedError("QwenTokenizeStrategy is a placeholder and should not be used directly for tokenization.")
 
 
 class QwenTextEncodingStrategy(TextEncodingStrategy):
-    def __init__(self) -> None:
-        pass
+    def __init__(self, trainer) -> None:
+        self.trainer = trainer
 
     def encode_tokens(
         self,
@@ -35,19 +34,15 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
         models: List[Any],
         tokens: List[torch.Tensor],
     ) -> List[torch.Tensor]:
-        text_encoder = models[0] # The text encoder is passed in the models list
+        pipeline = self.trainer.pipeline
         input_ids, attention_mask = tokens
 
-        # The Qwen text_encoder is a Qwen2Model, which returns BaseModelOutputWithPast.
-        # The first element is the last_hidden_state.
-        prompt_embeds = text_encoder(
-            input_ids=input_ids.to(text_encoder.device),
-            attention_mask=attention_mask.to(text_encoder.device),
+        prompt_embeds = pipeline.text_encoder(
+            input_ids=input_ids.to(pipeline.device),
+            attention_mask=attention_mask.to(pipeline.device),
         )[0]
 
-        # The prompt_embeds_mask is the attention_mask
         prompt_embeds_mask = attention_mask
-
         return [prompt_embeds, prompt_embeds_mask]
 
 
@@ -56,12 +51,14 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
 
     def __init__(
         self,
+        trainer,
         cache_to_disk: bool,
         batch_size: int,
         skip_disk_cache_validity_check: bool,
         is_partial: bool = False,
     ) -> None:
         super().__init__(cache_to_disk, batch_size, skip_disk_cache_validity_check, is_partial)
+        self.trainer = trainer
 
     def get_outputs_npz_path(self, image_abs_path: str) -> str:
         return os.path.splitext(image_abs_path)[0] + QwenTextEncoderOutputsCachingStrategy.QWEN_TEXT_ENCODER_OUTPUTS_NPZ_SUFFIX
@@ -95,11 +92,15 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
     def cache_batch_outputs(
         self, tokenize_strategy: TokenizeStrategy, models: List[Any], text_encoding_strategy: TextEncodingStrategy, infos: List
     ):
+        # Here, we need to use the tokenizer from the trainer, not the one from the tokenize_strategy
+        tokenizer = self.trainer.tokenizer
         captions = [info.caption for info in infos]
 
-        tokens = tokenize_strategy.tokenize(captions)
+        tokens = tokenizer(captions, max_length=1024, padding="max_length", truncation=True, return_tensors="pt")
+        token_list = [tokens["input_ids"], tokens["attention_mask"]]
+
         with torch.no_grad():
-            prompt_embeds, prompt_embeds_mask = text_encoding_strategy.encode_tokens(tokenize_strategy, models, tokens)
+            prompt_embeds, prompt_embeds_mask = text_encoding_strategy.encode_tokens(tokenize_strategy, models, token_list)
 
         if prompt_embeds.dtype == torch.bfloat16:
             prompt_embeds = prompt_embeds.float()
@@ -140,7 +141,7 @@ class QwenLatentsCachingStrategy(LatentsCachingStrategy):
             + QwenLatentsCachingStrategy.QWEN_LATENTS_NPZ_SUFFIX
         )
 
-    def is_disk_cached_latents_expected(self, bucket_reso: Tuple[int, int], npz_path: str, flip_aug: bool, alpha_mask: bool):
+    def is_disk_cached_outputs_expected(self, bucket_reso: Tuple[int, int], npz_path: str, flip_aug: bool, alpha_mask: bool):
         return self._default_is_disk_cached_latents_expected(8, bucket_reso, npz_path, flip_aug, alpha_mask, multi_resolution=True)
 
     def load_latents_from_disk(

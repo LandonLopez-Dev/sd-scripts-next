@@ -18,25 +18,22 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def load_qwen_text_encoder_and_tokenizer(model_name_or_path, torch_dtype, device, custom_text_encoder_path=None):
-    text_encoder_path = custom_text_encoder_path if custom_text_encoder_path is not None else model_name_or_path
-    text_encoder_subfolder = "text_encoder" if custom_text_encoder_path is None else None
-    tokenizer_subfolder = "tokenizer" if custom_text_encoder_path is None else None
-
-    logger.info(f"Loading Qwen2Model (Text Encoder) from: {text_encoder_path}")
-    text_encoder = Qwen2Model.from_pretrained(
-        text_encoder_path,
-        subfolder=text_encoder_subfolder,
+def load_qwen_pipeline(
+    model_name_or_path,
+    torch_dtype,
+    device,
+):
+    logger.info("Loading QwenImagePipeline (incomplete)")
+    # This pipeline is incomplete and only used to hold the tokenizer and text_encoder
+    # VAE and Transformer will be loaded separately.
+    pipeline = QwenImagePipeline.from_pretrained(
+        model_name_or_path,
+        transformer=None,
+        vae=None,
         torch_dtype=torch_dtype,
     )
-
-    logger.info(f"Loading CLIPTokenizer from: {text_encoder_path}")
-    tokenizer = CLIPTokenizer.from_pretrained(
-        text_encoder_path,
-        subfolder=tokenizer_subfolder
-    )
-    text_encoder.to(device)
-    return text_encoder, tokenizer
+    pipeline.to(device)
+    return pipeline
 
 
 def load_qwen_vae(
@@ -73,21 +70,18 @@ def load_qwen_transformer(
     return transformer
 
 
-def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, tokenizer):
+def sample_images(accelerator, args, epoch, global_step, pipeline, vae, unet, text_encoder, tokenizer):
     if not args.sample_prompts:
         return
 
     logger.info(f"Generating samples for epoch {epoch} step {global_step}")
 
-    # Create a new pipeline for sampling
-    # We don't need the scheduler from the training arguments, the pipeline will create its own.
-    pipeline = QwenImagePipeline(
-        vae=vae,
-        text_encoder=text_encoder,
-        transformer=unet,
-        tokenizer=tokenizer,
-        scheduler=None, # Will be created internally
-    )
+    # Attach the trained models to the pipeline for sampling
+    pipeline.vae = vae
+    pipeline.transformer = unet
+    pipeline.text_encoder = text_encoder
+    pipeline.tokenizer = tokenizer
+
     pipeline.to(accelerator.device)
 
     prompts = train_util.load_prompts(args.sample_prompts)
@@ -122,4 +116,9 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
             image.save(os.path.join(output_dir, filename))
 
     pipeline.to("cpu")
+    # Detach models
+    pipeline.vae = None
+    pipeline.transformer = None
+    pipeline.text_encoder = None
+    pipeline.tokenizer = None
     train_util.clean_memory_on_device(accelerator.device)
