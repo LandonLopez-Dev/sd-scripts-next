@@ -85,11 +85,28 @@ class LoRAModule(torch.nn.Module):
     def apply_to(self):
         self.org_forward = self.org_module.forward
         self.org_module.forward = self.forward
-        del self.org_module
+        # Keep reference to org_module for device/dtype alignment in forward
 
     def forward(self, x):
-        # With gradient checkpointing, x can be on CPU, so we need to move it to the same device as the LoRA weights
-        x = x.to(self.lora_down.weight.device, dtype=self.lora_down.weight.dtype)
+        # Ensure input and LoRA weights are on the same device/dtype as the original (wrapped) module
+        # Determine the base module's device and dtype from its weight
+        base_weight = getattr(self.org_module, 'weight', None)
+        if base_weight is not None:
+            target_device = base_weight.device
+            target_dtype = base_weight.dtype
+        else:
+            # Fallback: use input's current device/dtype
+            target_device = x.device
+            target_dtype = x.dtype
+
+        # Move input to base module's device/dtype
+        if x.device != target_device or x.dtype != target_dtype:
+            x = x.to(target_device, dtype=target_dtype)
+
+        # Move LoRA layers to match the base module's device/dtype when needed
+        if self.lora_down.weight.device != target_device or self.lora_down.weight.dtype != target_dtype:
+            self.lora_down.to(target_device, dtype=target_dtype)
+            self.lora_up.to(target_device, dtype=target_dtype)
 
         org_forwarded = self.org_forward(x)
 
