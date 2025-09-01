@@ -109,7 +109,7 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 num_inference_steps=steps,
-                guidance_scale=guidance_scale,
+                true_cfg_scale=guidance_scale,
                 generator=generator
             ).images[0]
 
