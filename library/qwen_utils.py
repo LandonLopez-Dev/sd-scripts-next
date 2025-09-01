@@ -7,7 +7,7 @@ from diffusers import (
     QwenImageTransformer2DModel,
     FlowMatchEulerDiscreteScheduler,
 )
-from transformers import Qwen2Model, CLIPTokenizer
+from transformers import AutoModel, Qwen2Model, CLIPTokenizer
 from PIL import Image
 import numpy as np
 from . import train_util
@@ -23,12 +23,15 @@ def load_qwen_text_encoder(model_name_or_path, torch_dtype, device, custom_text_
     text_encoder_path = custom_text_encoder_path if custom_text_encoder_path is not None else model_name_or_path
     subfolder = "text_encoder" if custom_text_encoder_path is None else None
 
-    logger.info(f"Loading Qwen2Model (Text Encoder) from: {text_encoder_path}")
-    text_encoder = Qwen2Model.from_pretrained(
+    logger.info(f"Loading Qwen-VL Model from: {text_encoder_path}")
+    qwen_vl = AutoModel.from_pretrained(
         text_encoder_path,
         subfolder=subfolder,
         torch_dtype=torch_dtype,
+        trust_remote_code=True,
     )
+
+    text_encoder = qwen_vl.language_model
     text_encoder.to(device)
     return text_encoder
 

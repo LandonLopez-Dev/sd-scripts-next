@@ -866,7 +866,7 @@ class LoRANetwork(torch.nn.Module):
 
     UNET_TARGET_REPLACE_MODULE = ["Transformer2DModel"]
     UNET_TARGET_REPLACE_MODULE_CONV2D_3X3 = ["ResnetBlock2D", "Downsample2D", "Upsample2D"]
-    TEXT_ENCODER_TARGET_REPLACE_MODULE = ["CLIPAttention", "CLIPSdpaAttention", "CLIPMLP"]
+    TEXT_ENCODER_TARGET_REPLACE_MODULE = ["CLIPAttention", "CLIPSdpaAttention", "CLIPMLP", "Qwen2Attention", "Qwen2MLP"]
     LORA_PREFIX_UNET = "lora_unet"
     LORA_PREFIX_TEXT_ENCODER = "lora_te"
 
@@ -961,58 +961,74 @@ class LoRANetwork(torch.nn.Module):
             skipped = []
             for name, module in root_module.named_modules():
                 if module.__class__.__name__ in target_replace_modules:
-                    for child_name, child_module in module.named_modules():
-                        is_linear = child_module.__class__.__name__ == "Linear"
-                        is_conv2d = child_module.__class__.__name__ == "Conv2d"
-                        is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
+                    if "Qwen2" in module.__class__.__name__:
+                        # Special handling for Qwen2 modules
+                        target_layer_names = []
+                        if "Attention" in module.__class__.__name__:
+                            target_layer_names.extend(["q_proj", "k_proj", "v_proj", "o_proj"])
+                        elif "MLP" in module.__class__.__name__:
+                            target_layer_names.extend(["gate_proj", "up_proj", "down_proj"])
 
-                        if is_linear or is_conv2d:
-                            lora_name = prefix + "." + name + "." + child_name
-                            lora_name = lora_name.replace(".", "_")
+                        for child_name, child_module in module.named_modules():
+                            if child_name in target_layer_names:
+                                lora_name = prefix + "." + name + "." + child_name
+                                lora_name = lora_name.replace(".", "_")
+                                dim = self.lora_dim
+                                alpha = self.alpha
+                                lora = module_class(
+                                    lora_name, child_module, self.multiplier, dim, alpha, dropout=dropout, rank_dropout=rank_dropout, module_dropout=module_dropout
+                                )
+                                loras.append(lora)
+                    else:
+                        # Existing logic for other models
+                        for child_name, child_module in module.named_modules():
+                            is_linear = child_module.__class__.__name__ == "Linear"
+                            is_conv2d = child_module.__class__.__name__ == "Conv2d"
+                            is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
 
-                            dim = None
-                            alpha = None
+                            if is_linear or is_conv2d:
+                                lora_name = prefix + "." + name + "." + child_name
+                                lora_name = lora_name.replace(".", "_")
 
-                            if modules_dim is not None:
-                                # モジュール指定あり
-                                if lora_name in modules_dim:
-                                    dim = modules_dim[lora_name]
-                                    alpha = modules_alpha[lora_name]
-                            elif is_unet and block_dims is not None:
-                                # U-Netでblock_dims指定あり
-                                block_idx = get_block_index(lora_name, is_sdxl)
-                                if is_linear or is_conv2d_1x1:
-                                    dim = block_dims[block_idx]
-                                    alpha = block_alphas[block_idx]
-                                elif conv_block_dims is not None:
-                                    dim = conv_block_dims[block_idx]
-                                    alpha = conv_block_alphas[block_idx]
-                            else:
-                                # 通常、すべて対象とする
-                                if is_linear or is_conv2d_1x1:
-                                    dim = self.lora_dim
-                                    alpha = self.alpha
-                                elif self.conv_lora_dim is not None:
-                                    dim = self.conv_lora_dim
-                                    alpha = self.conv_alpha
+                                dim = None
+                                alpha = None
 
-                            if dim is None or dim == 0:
-                                # skipした情報を出力
-                                if is_linear or is_conv2d_1x1 or (self.conv_lora_dim is not None or conv_block_dims is not None):
-                                    skipped.append(lora_name)
-                                continue
+                                if modules_dim is not None:
+                                    if lora_name in modules_dim:
+                                        dim = modules_dim[lora_name]
+                                        alpha = modules_alpha[lora_name]
+                                elif is_unet and block_dims is not None:
+                                    block_idx = get_block_index(lora_name, is_sdxl)
+                                    if is_linear or is_conv2d_1x1:
+                                        dim = block_dims[block_idx]
+                                        alpha = block_alphas[block_idx]
+                                    elif conv_block_dims is not None:
+                                        dim = conv_block_dims[block_idx]
+                                        alpha = conv_block_alphas[block_idx]
+                                else:
+                                    if is_linear or is_conv2d_1x1:
+                                        dim = self.lora_dim
+                                        alpha = self.alpha
+                                    elif self.conv_lora_dim is not None:
+                                        dim = self.conv_lora_dim
+                                        alpha = self.conv_alpha
 
-                            lora = module_class(
-                                lora_name,
-                                child_module,
-                                self.multiplier,
-                                dim,
-                                alpha,
-                                dropout=dropout,
-                                rank_dropout=rank_dropout,
-                                module_dropout=module_dropout,
-                            )
-                            loras.append(lora)
+                                if dim is None or dim == 0:
+                                    if is_linear or is_conv2d_1x1 or (self.conv_lora_dim is not None or conv_block_dims is not None):
+                                        skipped.append(lora_name)
+                                    continue
+
+                                lora = module_class(
+                                    lora_name,
+                                    child_module,
+                                    self.multiplier,
+                                    dim,
+                                    alpha,
+                                    dropout=dropout,
+                                    rank_dropout=rank_dropout,
+                                    module_dropout=module_dropout,
+                                )
+                                loras.append(lora)
             return loras, skipped
 
         text_encoders = text_encoder if type(text_encoder) == list else [text_encoder]
