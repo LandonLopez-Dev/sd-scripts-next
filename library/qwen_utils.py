@@ -108,7 +108,7 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
     with torch.no_grad(), accelerator.autocast():
         for i, prompt_data in enumerate(prompts):
             prompt = prompt_data.get("prompt")
-            negative_prompt = prompt_data.get("negative_prompt")
+            negative_prompt = prompt_data.get("negative_prompt", "")
             seed = prompt_data.get("seed")
             if seed is None:
                 seed = random.randint(0, 2**32 - 1)
@@ -117,8 +117,8 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
 
             logger.info(f"Generating image for prompt: {prompt}")
 
-            steps = prompt_data.get("steps", 30)
-            guidance_scale = prompt_data.get("guidance_scale", 7.5)
+            steps = prompt_data.get("steps", 25)
+            guidance_scale = prompt_data.get("guidance_scale", 4.0)
 
             image = pipeline(
                 prompt=prompt,
