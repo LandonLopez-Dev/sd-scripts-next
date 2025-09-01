@@ -126,29 +126,73 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         is_train=True,
     ):
         bsz = latents.shape[0]
-        noise = torch.randn_like(latents, device=accelerator.device, dtype=weight_dtype)
 
-        u = torch.rand(bsz, device=accelerator.device)
-        indices = (u * noise_scheduler.config.num_train_timesteps).long()
-        timesteps = noise_scheduler.timesteps[indices].to(device=latents.device)
+        # Ensure latents layout matches Qwen pipeline expectations: (B, 1, C, H, W)
+        # Commonly our VAE produces (B, C, 1, H, W). If so, permute to (B, 1, C, H, W).
+        if latents.dim() == 5 and latents.shape[2] == 1 and latents.shape[1] != 1:
+            # Already (B, C, 1, H, W) -> (B, 1, C, H, W)
+            latents = latents.permute(0, 2, 1, 3, 4).contiguous()
+        
+        noise = torch.randn_like(latents, device=latents.device, dtype=weight_dtype)
 
-        sigmas = noise_scheduler.sigmas[indices].to(device=latents.device, dtype=latents.dtype)
+        u = torch.rand(bsz, device=latents.device)
+        indices = (u * noise_scheduler.config.num_train_timesteps).long().to(device=latents.device)
+        timesteps = noise_scheduler.timesteps.to(device=latents.device)[indices]
+
+        sigmas = noise_scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[indices]
         sigmas = sigmas.view(bsz, 1, 1, 1, 1)
 
         noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
 
-        packed_noisy_model_input = unet._pack_latents(
+        # Extract dims assuming (B, 1, C, H, W)
+        _, _, num_channels_latents, h, w = noisy_model_input.shape
+
+        # QwenImageTransformer2DModel does not expose _pack_latents. Implement locally, matching the pipeline logic.
+        def _pack_latents(latents, batch_size, num_channels_latents, height, width):
+            latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
+            latents = latents.permute(0, 2, 4, 1, 3, 5)
+            latents = latents.reshape(batch_size, (height // 2) * (width // 2), num_channels_latents * 4)
+            return latents
+
+        packed_noisy_model_input = _pack_latents(
             noisy_model_input,
             bsz,
-            noisy_model_input.shape[2],
-            noisy_model_input.shape[3],
-            noisy_model_input.shape[4],
+            num_channels_latents,
+            h,
+            w,
         )
 
-        img_shapes = [(1, noisy_model_input.shape[3] // 2, noisy_model_input.shape[4] // 2)] * bsz
+        img_shapes = [[(1, h // 2, w // 2)]] * bsz
 
         prompt_embeds, prompt_embeds_mask = text_encoder_conds
+        # Ensure text condition tensors match transformer input device/dtype
+        pe_device = packed_noisy_model_input.device
+        pe_dtype = packed_noisy_model_input.dtype
+        if prompt_embeds.device != pe_device or prompt_embeds.dtype != pe_dtype:
+            prompt_embeds = prompt_embeds.to(device=pe_device, dtype=pe_dtype)
+        if prompt_embeds_mask.device != pe_device:
+            prompt_embeds_mask = prompt_embeds_mask.to(device=pe_device)
+
+        # Clamp text sequence length to a safe maximum like the pipeline (default 512)
+        max_sequence_length = 512
+        if prompt_embeds.dim() == 3 and prompt_embeds.shape[1] > max_sequence_length:
+            prompt_embeds = prompt_embeds[:, :max_sequence_length]
+        if prompt_embeds_mask.dim() == 2 and prompt_embeds_mask.shape[1] > max_sequence_length:
+            prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
+
         txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+
+        # Also ensure timesteps reside on same device
+        timesteps = timesteps.to(device=pe_device)
+
+        # Ensure the Qwen transformer (unet) is on the same device as inputs
+        try:
+            unet_param_device = next(unet.parameters()).device
+        except StopIteration:
+            unet_param_device = pe_device
+        if unet_param_device != pe_device:
+            logger.info(f"Moving Qwen transformer to device {pe_device} (was {unet_param_device}) to match inputs")
+            unet.to(pe_device)
 
         model_pred = unet(
             hidden_states=packed_noisy_model_input,
@@ -161,14 +205,26 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             return_dict=False,
         )[0]
 
-        model_pred = unet._unpack_latents(
+        # Implement local unpack to avoid relying on pipeline private methods
+        def _unpack_latents(latents, height, width, vae_scale_factor):
+            batch_size, num_patches, channels = latents.shape
+            # Make height/width divisible by 2 and VAE scale factor like in pipeline
+            height = 2 * (int(height) // (vae_scale_factor * 2))
+            width = 2 * (int(width) // (vae_scale_factor * 2))
+            latents = latents.view(batch_size, height // 2, width // 2, channels // 4, 2, 2)
+            latents = latents.permute(0, 3, 1, 4, 2, 5)
+            latents = latents.reshape(batch_size, channels // (2 * 2), 1, height, width)
+            return latents
+
+        model_pred = _unpack_latents(
             model_pred,
-            height=noisy_model_input.shape[3] * self.vae_scale_factor,
-            width=noisy_model_input.shape[4] * self.vae_scale_factor,
+            height=h * self.vae_scale_factor,
+            width=w * self.vae_scale_factor,
             vae_scale_factor=self.vae_scale_factor,
         )
 
         target = noise - latents
+        # Return target in (B, C, 1, H, W) like the rest of the training code expects
         target = target.permute(0, 2, 1, 3, 4)
 
         return model_pred, target, timesteps, None
