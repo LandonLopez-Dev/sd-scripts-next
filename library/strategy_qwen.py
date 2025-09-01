@@ -43,8 +43,8 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
         # The Qwen text_encoder is a Qwen2Model, which returns BaseModelOutputWithPast.
         # The first element is the last_hidden_state.
         prompt_embeds = text_encoder(
-            input_ids=input_ids.to(text_encoder.device),
-            attention_mask=attention_mask.to(text_encoder.device),
+            input_ids=input_ids,
+            attention_mask=attention_mask,
         )[0]
 
         # The prompt_embeds_mask is the attention_mask
