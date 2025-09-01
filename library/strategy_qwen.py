@@ -44,9 +44,13 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
         # The first element is the last_hidden_state.
         # We need to manually move the tensors to the same device as the text encoder,
         # as this method is called outside of the accelerator's context during caching.
+        if input_ids.device != text_encoder.device:
+            input_ids = input_ids.to(text_encoder.device)
+            attention_mask = attention_mask.to(text_encoder.device)
+
         prompt_embeds = text_encoder(
-            input_ids=input_ids.to(text_encoder.device),
-            attention_mask=attention_mask.to(text_encoder.device),
+            input_ids=input_ids,
+            attention_mask=attention_mask,
         )[0]
 
         # The prompt_embeds_mask is the attention_mask
@@ -65,6 +69,10 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         skip_disk_cache_validity_check: bool,
         is_partial: bool = True,
     ) -> None:
+        # We set is_partial=True to ensure that the dataset always provides input_ids,
+        # even when caching is enabled. This is a fallback mechanism to handle cases
+        # where text encoder outputs are not cached for some images (e.g., those with empty captions),
+        # preventing crashes when the training loop expects input_ids.
         super().__init__(cache_to_disk, batch_size, skip_disk_cache_validity_check, is_partial)
 
     def get_outputs_npz_path(self, image_abs_path: str) -> str:

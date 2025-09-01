@@ -95,7 +95,7 @@ class LoRAModule(torch.nn.Module):
             if torch.rand(1) < self.module_dropout:
                 return org_forwarded
 
-        lx = self.lora_down(x)
+        lx = self.lora_down(x.to(self.lora_down.weight.device, dtype=self.lora_down.weight.dtype))
 
         # normal dropout
         if self.dropout is not None and self.training:
