@@ -88,6 +88,9 @@ class LoRAModule(torch.nn.Module):
         del self.org_module
 
     def forward(self, x):
+        # With gradient checkpointing, x can be on CPU, so we need to move it to the same device as the LoRA weights
+        x = x.to(self.lora_down.weight.device, dtype=self.lora_down.weight.dtype)
+
         org_forwarded = self.org_forward(x)
 
         # module dropout
@@ -95,7 +98,7 @@ class LoRAModule(torch.nn.Module):
             if torch.rand(1) < self.module_dropout:
                 return org_forwarded
 
-        lx = self.lora_down(x.to(self.lora_down.weight.device, dtype=self.lora_down.weight.dtype))
+        lx = self.lora_down(x)
 
         # normal dropout
         if self.dropout is not None and self.training:
@@ -118,7 +121,7 @@ class LoRAModule(torch.nn.Module):
 
         lx = self.lora_up(lx)
 
-        return org_forwarded.to(lx.device) + lx * self.multiplier * scale
+        return org_forwarded + lx * self.multiplier * scale
 
 
 class LoRAInfModule(LoRAModule):
