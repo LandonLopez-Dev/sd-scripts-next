@@ -61,7 +61,7 @@ class QwenTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy):
         cache_to_disk: bool,
         batch_size: int,
         skip_disk_cache_validity_check: bool,
-        is_partial: bool = False,
+        is_partial: bool = True,
     ) -> None:
         super().__init__(cache_to_disk, batch_size, skip_disk_cache_validity_check, is_partial)
 
