@@ -34,6 +34,12 @@ def load_qwen_text_encoder(model_name_or_path, torch_dtype, device, custom_text_
 
     text_encoder = qwen_vl.language_model
     text_encoder.to(device)
+
+    # Manually move the rotary embedding buffer to the correct device, as it might not be moved automatically.
+    # This is a workaround for a potential issue in the Qwen model implementation when used with gradient checkpointing.
+    if hasattr(text_encoder, "rotary_emb") and hasattr(text_encoder.rotary_emb, "inv_freq"):
+        text_encoder.rotary_emb.inv_freq = text_encoder.rotary_emb.inv_freq.to(device)
+
     return text_encoder
 
 
