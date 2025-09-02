@@ -180,7 +180,18 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         if prompt_embeds_mask.dim() == 2 and prompt_embeds_mask.shape[1] > max_sequence_length:
             prompt_embeds_mask = prompt_embeds_mask[:, :max_sequence_length]
 
+        # Compute per-sample text lengths and trim sequences to the batch max valid length to avoid rotary mismatch
+        if prompt_embeds_mask.dtype != torch.bool:
+            prompt_embeds_mask = prompt_embeds_mask.to(torch.bool)
         txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+        max_valid_len = int(max(txt_seq_lens)) if len(txt_seq_lens) > 0 else prompt_embeds.shape[1]
+        # Ensure at least length 1 to avoid empty slices
+        max_valid_len = max(1, min(max_valid_len, prompt_embeds.shape[1]))
+        # Slice both embeddings and mask to the max valid length in this batch
+        if prompt_embeds.shape[1] != max_valid_len:
+            prompt_embeds = prompt_embeds[:, :max_valid_len]
+        if prompt_embeds_mask.shape[1] != max_valid_len:
+            prompt_embeds_mask = prompt_embeds_mask[:, :max_valid_len]
 
         # Also ensure timesteps reside on same device
         timesteps = timesteps.to(device=pe_device)
