@@ -132,7 +132,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         if latents.dim() == 5 and latents.shape[2] == 1 and latents.shape[1] != 1:
             # Already (B, C, 1, H, W) -> (B, 1, C, H, W)
             latents = latents.permute(0, 2, 1, 3, 4).contiguous()
-        
+
         noise = torch.randn_like(latents, device=latents.device, dtype=weight_dtype)
 
         u = torch.rand(bsz, device=latents.device)
@@ -140,9 +140,9 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         timesteps = noise_scheduler.timesteps.to(device=latents.device)[indices]
 
         sigmas = noise_scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[indices]
-        sigmas = sigmas.view(bsz, 1, 1, 1, 1)
+        sigmas_5d = sigmas.view(bsz, 1, 1, 1, 1)
 
-        noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
+        noisy_model_input = (1.0 - sigmas_5d) * latents + sigmas_5d * noise
 
         # Extract dims assuming (B, 1, C, H, W)
         _, _, num_channels_latents, h, w = noisy_model_input.shape
@@ -205,7 +205,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             logger.info(f"Moving Qwen transformer to device {pe_device} (was {unet_param_device}) to match inputs")
             unet.to(pe_device)
 
-        model_pred = unet(
+        model_pred_packed = unet(
             hidden_states=packed_noisy_model_input,
             timestep=timesteps / 1000,
             guidance=None,
@@ -215,6 +215,11 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             txt_seq_lens=txt_seq_lens,
             return_dict=False,
         )[0]
+
+        # Precondition model output as in flow-matching training (similar to SD3):
+        # f_theta = model * (-sigma) + x_t
+        sigmas_packed = sigmas.view(bsz, 1, 1).to(dtype=model_pred_packed.dtype, device=model_pred_packed.device)
+        model_pred_packed = model_pred_packed * (-sigmas_packed) + packed_noisy_model_input
 
         # Implement local unpack to avoid relying on pipeline private methods
         def _unpack_latents(latents, height, width, vae_scale_factor):
@@ -227,16 +232,18 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             latents = latents.reshape(batch_size, channels // (2 * 2), 1, height, width)
             return latents
 
-        model_pred = _unpack_latents(
-            model_pred,
+        model_pred_5d = _unpack_latents(
+            model_pred_packed,
             height=h * self.vae_scale_factor,
             width=w * self.vae_scale_factor,
             vae_scale_factor=self.vae_scale_factor,
         )
+        # Convert to (B, C, H, W)
+        model_pred = model_pred_5d.squeeze(2)
 
-        target = noise - latents
-        # Return target in (B, C, 1, H, W) like the rest of the training code expects
-        target = target.permute(0, 2, 1, 3, 4)
+        # Build target for flow-matching: the clean latents in the same layout as model_pred
+        # Convert latents (B, 1, C, H, W) -> (B, C, H, W)
+        target = latents.permute(0, 2, 1, 3, 4).squeeze(2)
 
         return model_pred, target, timesteps, None
 
