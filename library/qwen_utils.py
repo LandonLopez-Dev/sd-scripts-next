@@ -124,15 +124,15 @@ def quantize_qwen_transformer_on_demand(transformer, device, dtype):
             if module is not None:
                 modules_to_quantize.append(module)
 
-    logger.info(f"Quantizing {len(modules_to_quantize)} modules to qfloat8...")
+    # Move the entire transformer to the target device before quantization
+    transformer.to(device, dtype=dtype)
+
+    logger.info(f"Quantizing {len(modules_to_quantize)} modules to qfloat8 on device: {device}...")
     for module in tqdm(modules_to_quantize, desc="Quantizing modules"):
-        module.to(device, dtype=dtype)
         quantize(module, weights=qfloat8)
         freeze(module)
-        module.to("cpu")
 
-    logger.info("Quantization complete. Moving full transformer to CPU.")
-    transformer.to("cpu")
+    logger.info("Quantization complete. The quantized transformer remains on its target device.")
     return transformer
 
 
