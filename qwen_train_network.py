@@ -279,15 +279,6 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="[EXPERIMENTAL] quantize the Qwen transformer to qfloat8 on demand to save VRAM",
     )
-    # On Windows, default to single-process DataLoader to avoid hangs with Qwen
-    if os.name == "nt":
-        try:
-            parser.set_defaults(max_data_loader_n_workers=0, persistent_data_loader_workers=False)
-            logger.info(
-                "Windows detected: set max_data_loader_n_workers=0 and disabled persistent_data_loader_workers for Qwen trainer to avoid DataLoader hangs."
-            )
-        except Exception:
-            pass
     return parser
 
 
