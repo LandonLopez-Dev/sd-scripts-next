@@ -16,6 +16,7 @@ from library.utils import setup_logging
 
 setup_logging()
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,15 @@ def setup_parser() -> argparse.ArgumentParser:
         default=None,
         help="path to the text encoder model to use, if different from the main model",
     )
+    # On Windows, default to single-process DataLoader to avoid hangs with Qwen
+    if os.name == "nt":
+        try:
+            parser.set_defaults(max_data_loader_n_workers=0, persistent_data_loader_workers=False)
+            logger.info(
+                "Windows detected: set max_data_loader_n_workers=0 and disabled persistent_data_loader_workers for Qwen trainer to avoid DataLoader hangs."
+            )
+        except Exception:
+            pass
     return parser
 
 
