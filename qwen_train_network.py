@@ -169,13 +169,19 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             # Already (B, C, 1, H, W) -> (B, 1, C, H, W)
             latents = latents.permute(0, 2, 1, 3, 4).contiguous()
 
+        # Ensure latents are in compute dtype to avoid implicit upcasts and larger buffers
+        if latents.dtype != weight_dtype:
+            latents = latents.to(dtype=weight_dtype)
+
         noise = torch.randn_like(latents, device=latents.device, dtype=weight_dtype)
 
         u = torch.rand(bsz, device=latents.device)
-        indices = (u * noise_scheduler.config.num_train_timesteps).long().to(device=latents.device)
-        timesteps = noise_scheduler.timesteps.to(device=latents.device)[indices]
+        indices = (u * noise_scheduler.config.num_train_timesteps).long()
+        # Keep scheduler buffers on CPU and only gather the indexed values to GPU to avoid large persistent GPU tensors
+        indices_cpu = indices.to("cpu")
+        timesteps = noise_scheduler.timesteps[indices_cpu].to(device=latents.device)
 
-        sigmas = noise_scheduler.sigmas.to(device=latents.device, dtype=latents.dtype)[indices]
+        sigmas = noise_scheduler.sigmas[indices_cpu].to(device=latents.device, dtype=latents.dtype)
         sigmas_5d = sigmas.view(bsz, 1, 1, 1, 1)
 
         noisy_model_input = (1.0 - sigmas_5d) * latents + sigmas_5d * noise
@@ -254,12 +260,45 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             width=w * self.vae_scale_factor,
             vae_scale_factor=self.vae_scale_factor,
         )
+        # Free packed tensor ASAP to reduce peak memory
+        del model_pred_packed
         # Convert to (B, C, H, W)
         model_pred = model_pred_5d.squeeze(2)
+        del model_pred_5d
 
         # Build target for flow-matching: the clean latents in the same layout as model_pred
         # Convert latents (B, 1, C, H, W) -> (B, C, H, W)
-        target = latents.permute(0, 2, 1, 3, 4).squeeze(2)
+        # These are inputs; ensure they don't hold graph history and reduce precision to weight_dtype when safe
+        with torch.no_grad():
+            target = latents.permute(0, 2, 1, 3, 4).squeeze(2)
+            if target.dtype != weight_dtype:
+                target = target.to(dtype=weight_dtype)
+
+        # Free intermediates that are no longer needed to prevent VRAM bloat
+        del noisy_model_input
+        del sigmas_5d
+        del sigmas
+        del indices
+        if 'indices_cpu' in locals():
+            del indices_cpu
+        del u
+        del noise
+        if 'packed_noisy_model_input' in locals():
+            del packed_noisy_model_input
+        if 'prompt_embeds' in locals():
+            # prompt tensors are small compared to image latents, but free them anyway
+            del prompt_embeds
+        if 'prompt_embeds_mask' in locals():
+            del prompt_embeds_mask
+        if 'img_shapes' in locals():
+            del img_shapes
+        if 'txt_seq_lens' in locals():
+            del txt_seq_lens
+        # Let Accelerate handle cache trimming; still try to hint the allocator
+        try:
+            clean_memory_on_device(accelerator.device)
+        except Exception:
+            pass
 
         return model_pred, target, timesteps, None
 
