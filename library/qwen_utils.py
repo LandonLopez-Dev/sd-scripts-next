@@ -108,7 +108,7 @@ def load_qwen_transformer(
 
 def quantize_qwen_transformer_on_demand(transformer, device, dtype):
     try:
-        from optimum.quanto import quantize, qfloat8, freeze
+        from quanto import quantize, qfloat8, freeze
         from tqdm import tqdm
     except ImportError:
         raise ImportError("optimum and quanto are required for on-demand quantization. Please install them.")
