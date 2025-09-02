@@ -78,10 +78,28 @@ def load_qwen_transformer(
 
 
 def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, tokenizer):
+    # Align sampling cadence with SD3/FLUX
     if not args.sample_prompts:
         return
 
-    logger.info(f"Generating samples for epoch {epoch} step {global_step}")
+    steps = global_step
+    if steps == 0:
+        if not getattr(args, "sample_at_first", False):
+            return
+    else:
+        if getattr(args, "sample_every_n_steps", None) is None and getattr(args, "sample_every_n_epochs", None) is None:
+            return
+        if getattr(args, "sample_every_n_epochs", None) is not None:
+            # ignore sample_every_n_steps when epoch-based sampling is configured
+            if epoch is None or epoch % args.sample_every_n_epochs != 0:
+                return
+        else:
+            # Only sample during training steps (not end-of-epoch) and at the configured interval
+            if steps % args.sample_every_n_steps != 0 or epoch is not None:
+                return
+
+    logger.info("")
+    logger.info(f"generating sample images at step / サンプル画像生成 ステップ: {steps}")
 
     # Create a new pipeline for sampling from the standalone components
     scheduler_config = {
@@ -123,22 +141,23 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
 
             logger.info(f"Generating image for prompt: {prompt}")
 
-            steps = prompt_data.get("steps", 25)
+            num_infer_steps = prompt_data.get("steps", 25)
             guidance_scale = prompt_data.get("guidance_scale", 4.0)
 
             image = pipeline(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
-                num_inference_steps=steps,
+                num_inference_steps=num_infer_steps,
                 true_cfg_scale=guidance_scale,
-                generator=generator
+                generator=generator,
             ).images[0]
 
             # save image
             output_dir = os.path.join(args.output_dir, "sample")
             os.makedirs(output_dir, exist_ok=True)
 
-            filename = f"epoch-{epoch:06d}-step-{global_step:06d}-{i:02d}-{seed}.png"
+            num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+            filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{seed}.png"
             image.save(os.path.join(output_dir, filename))
 
     pipeline.to("cpu")
