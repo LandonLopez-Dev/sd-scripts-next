@@ -40,6 +40,11 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
         text_encoder = models[0] # The text encoder is passed in the models list
         input_ids, attention_mask = tokens
 
+        # Clamp to a conservative max length to align with training and avoid rotary shape mismatches
+        max_len = min(input_ids.shape[1], 512)
+        input_ids = input_ids[:, :max_len]
+        attention_mask = attention_mask[:, :max_len]
+
         # The Qwen text_encoder is a Qwen2Model, which returns BaseModelOutputWithPast.
         # The first element is the last_hidden_state.
         # We need to manually move the tensors to the same device as the text encoder,
@@ -53,8 +58,8 @@ class QwenTextEncodingStrategy(TextEncodingStrategy):
             attention_mask=attention_mask,
         )[0]
 
-        # The prompt_embeds_mask is the attention_mask
-        prompt_embeds_mask = attention_mask
+        # The prompt_embeds_mask is the attention_mask; cast to bool for downstream diffusers usage
+        prompt_embeds_mask = attention_mask.to(dtype=torch.bool)
 
         return [prompt_embeds, prompt_embeds_mask]
 
