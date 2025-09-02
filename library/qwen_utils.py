@@ -66,6 +66,8 @@ def load_qwen_transformer(
     model_name_or_path,
     torch_dtype,
     device,
+    accelerator=None,
+    args=None,
 ):
     logger.info("Loading QwenImageTransformer2DModel")
     transformer = QwenImageTransformer2DModel.from_pretrained(
@@ -74,6 +76,29 @@ def load_qwen_transformer(
         torch_dtype=torch_dtype,
     )
     transformer.to(device)
+
+    # Enable gradient checkpointing for Qwen transformer when requested or when using grad accumulation
+    try:
+        enable_ckpt = False
+        if accelerator is not None and getattr(accelerator, "gradient_accumulation_steps", 1) > 1:
+            enable_ckpt = True
+        if args is not None and getattr(args, "gradient_checkpointing", False):
+            enable_ckpt = True
+        if enable_ckpt:
+            # Match HF convention if available
+            if hasattr(transformer, "enable_input_require_grads"):
+                transformer.enable_input_require_grads()
+            # diffusers models often expose gradient_checkpointing_enable
+            if hasattr(transformer, "gradient_checkpointing_enable"):
+                transformer.gradient_checkpointing_enable()
+            else:
+                # Fallback: set a common flag if present
+                if hasattr(transformer, "gradient_checkpointing"):
+                    transformer.gradient_checkpointing = True
+            logger.info("Enabled gradient checkpointing for Qwen transformer")
+    except Exception as e:
+        logger.warning(f"Failed to enable gradient checkpointing for Qwen transformer: {e}")
+
     return transformer
 
 

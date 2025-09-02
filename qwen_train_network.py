@@ -39,7 +39,13 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             args.pretrained_model_name_or_path, weight_dtype, "cpu", custom_text_encoder_path=args.text_encoder_path
         )
         vae = qwen_utils.load_qwen_vae(args.pretrained_model_name_or_path, weight_dtype, "cpu", custom_vae_path=args.vae)
-        unet = qwen_utils.load_qwen_transformer(args.pretrained_model_name_or_path, weight_dtype, "cpu")
+        unet = qwen_utils.load_qwen_transformer(
+            args.pretrained_model_name_or_path,
+            weight_dtype,
+            "cpu",
+            accelerator=accelerator,
+            args=args,
+        )
 
         return "qwen-v1", [text_encoder], vae, unet
 
@@ -205,16 +211,18 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             logger.info(f"Moving Qwen transformer to device {pe_device} (was {unet_param_device}) to match inputs")
             unet.to(pe_device)
 
-        model_pred_packed = unet(
-            hidden_states=packed_noisy_model_input,
-            timestep=sigmas.to(device=pe_device),
-            guidance=None,
-            encoder_hidden_states_mask=prompt_embeds_mask,
-            encoder_hidden_states=prompt_embeds,
-            img_shapes=img_shapes,
-            txt_seq_lens=txt_seq_lens,
-            return_dict=False,
-        )[0]
+        # Run Qwen forward under Accelerate's autocast so it respects --mixed_precision
+        with accelerator.autocast():
+            model_pred_packed = unet(
+                hidden_states=packed_noisy_model_input,
+                timestep=sigmas.to(device=pe_device, dtype=pe_dtype),
+                guidance=None,
+                encoder_hidden_states_mask=prompt_embeds_mask,
+                encoder_hidden_states=prompt_embeds,
+                img_shapes=img_shapes,
+                txt_seq_lens=txt_seq_lens,
+                return_dict=False,
+            )[0]
 
         # Implement local unpack to avoid relying on pipeline private methods
         def _unpack_latents(latents, height, width):
