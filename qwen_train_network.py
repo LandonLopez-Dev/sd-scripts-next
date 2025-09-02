@@ -296,6 +296,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     train_util.verify_command_line_training_args(args)
+
+    if os.name == "nt":
+        logger.info("Windows detected: Forcing max_data_loader_n_workers=0 and disabling persistent workers to prevent hangs.")
+        args.max_data_loader_n_workers = 0
+        args.persistent_data_loader_workers = False
+
     args = train_util.read_config_from_file(args, parser)
 
     trainer = QwenNetworkTrainer()
