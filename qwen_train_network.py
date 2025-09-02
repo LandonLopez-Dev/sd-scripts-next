@@ -109,7 +109,6 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             text_encoder.embed_tokens.requires_grad_(True)
 
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizers, text_encoder, unet):
-        logger.info("Generating samples with Qwen-specific pipeline...")
         qwen_utils.sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, tokenizers[0])
 
     def get_noise_pred_and_target(
