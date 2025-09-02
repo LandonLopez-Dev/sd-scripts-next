@@ -113,27 +113,26 @@ def quantize_qwen_transformer_on_demand(transformer, device, dtype):
     except ImportError:
         raise ImportError("optimum and quanto are required for on-demand quantization. Please install them.")
 
-    logger.info("Quantizing transformer blocks to qfloat8...")
-    all_blocks = list(transformer.transformer_blocks)
-    for block in tqdm(all_blocks, desc="Quantizing blocks"):
-        block.to(device, dtype=dtype)
-        quantize(block, weights=qfloat8)
-        freeze(block)
-        block.to("cpu")
+    logger.info("Gathering modules for on-demand quantization...")
+    modules_to_quantize = []
+    modules_to_quantize.extend(list(transformer.transformer_blocks))
 
-    logger.info("Quantizing other transformer modules to qfloat8...")
-    # List of other modules to quantize, based on QwenImageTransformer2DModel structure
-    other_modules = ["to_patch_embedding", "pos_embed", "norm_out", "to_final_layer"]
-    for module_name in tqdm(other_modules, desc="Quantizing other modules"):
-        if hasattr(transformer, module_name):
-            module = getattr(transformer, module_name)
+    other_module_names = ["to_patch_embedding", "pos_embed", "norm_out", "to_final_layer"]
+    for name in other_module_names:
+        if hasattr(transformer, name):
+            module = getattr(transformer, name)
             if module is not None:
-                module.to(device, dtype=dtype)
-                quantize(module, weights=qfloat8)
-                freeze(module)
-                module.to("cpu")
+                modules_to_quantize.append(module)
 
-    logger.info("Quantization complete.")
+    logger.info(f"Quantizing {len(modules_to_quantize)} modules to qfloat8...")
+    for module in tqdm(modules_to_quantize, desc="Quantizing modules"):
+        module.to(device, dtype=dtype)
+        quantize(module, weights=qfloat8)
+        freeze(module)
+        module.to("cpu")
+
+    logger.info("Quantization complete. Moving full transformer to CPU.")
+    transformer.to("cpu")
     return transformer
 
 
