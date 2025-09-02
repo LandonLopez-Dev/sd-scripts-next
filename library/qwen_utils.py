@@ -99,6 +99,34 @@ def load_qwen_transformer(
     except Exception as e:
         logger.warning(f"Failed to enable gradient checkpointing for Qwen transformer: {e}")
 
+    if args is not None and getattr(args, "use_qfloat8_on_demand", False):
+        logger.info("Quantizing Qwen transformer on demand to qfloat8")
+        transformer = quantize_qwen_transformer_on_demand(transformer, accelerator.device, torch_dtype)
+
+    return transformer
+
+
+def quantize_qwen_transformer_on_demand(transformer, device, dtype):
+    try:
+        from optimum.quanto import quantize, qfloat8, freeze
+        from tqdm import tqdm
+    except ImportError:
+        raise ImportError("optimum and quanto are required for on-demand quantization. Please install them.")
+
+    logger.info("Quantizing transformer blocks to qfloat8...")
+    all_blocks = list(transformer.transformer_blocks)
+    for block in tqdm(all_blocks, desc="Quantizing blocks"):
+        block.to(device, dtype=dtype)
+        quantize(block, weights=qfloat8)
+        freeze(block)
+        block.to("cpu")
+
+    logger.info("Quantizing top-level transformer...")
+    transformer.to(device, dtype=dtype)
+    quantize(transformer, weights=qfloat8)
+    freeze(transformer)
+
+    logger.info("Quantization complete.")
     return transformer
 
 

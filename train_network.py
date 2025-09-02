@@ -614,7 +614,24 @@ class NetworkTrainer:
             accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
 
         # 学習を準備する
-        if cache_latents:
+        # 必要ならテキストエンコーダーの出力をキャッシュする: Text Encoderはcpuまたはgpuへ移される
+        # cache text encoder outputs if needed: Text Encoder is moved to cpu or gpu
+        text_encoding_strategy = self.get_text_encoding_strategy(args)
+        strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
+
+        text_encoder_outputs_caching_strategy = self.get_text_encoder_outputs_caching_strategy(args)
+        if text_encoder_outputs_caching_strategy is not None:
+            strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_outputs_caching_strategy)
+        self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, train_dataset_group, weight_dtype)
+        if val_dataset_group is not None:
+            self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, val_dataset_group, weight_dtype)
+
+        # Latent caching
+        if hasattr(self, "cache_latents_if_needed"):
+            self.cache_latents_if_needed(args, accelerator, unet, vae, text_encoders, train_dataset_group, weight_dtype)
+            if val_dataset_group is not None:
+                self.cache_latents_if_needed(args, accelerator, unet, vae, text_encoders, val_dataset_group, weight_dtype)
+        elif cache_latents:
             vae.to(accelerator.device, dtype=vae_dtype)
             vae.requires_grad_(False)
             vae.eval()
@@ -627,18 +644,6 @@ class NetworkTrainer:
             clean_memory_on_device(accelerator.device)
 
             accelerator.wait_for_everyone()
-
-        # 必要ならテキストエンコーダーの出力をキャッシュする: Text Encoderはcpuまたはgpuへ移される
-        # cache text encoder outputs if needed: Text Encoder is moved to cpu or gpu
-        text_encoding_strategy = self.get_text_encoding_strategy(args)
-        strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
-
-        text_encoder_outputs_caching_strategy = self.get_text_encoder_outputs_caching_strategy(args)
-        if text_encoder_outputs_caching_strategy is not None:
-            strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_outputs_caching_strategy)
-        self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, train_dataset_group, weight_dtype)
-        if val_dataset_group is not None:
-            self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, val_dataset_group, weight_dtype)
 
         # prepare network
         net_kwargs = {}

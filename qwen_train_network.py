@@ -1,6 +1,7 @@
 import argparse
 import torch
 from accelerate import Accelerator
+from diffusers import QwenImagePipeline
 
 from library.device_utils import clean_memory_on_device, init_ipex
 
@@ -110,6 +111,35 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             vae.to(org_vae_device)
             unet.to(org_unet_device)
 
+    def cache_latents_if_needed(
+        self, args, accelerator: Accelerator, unet, vae, text_encoders, dataset: train_util.DatasetGroup, weight_dtype
+    ):
+        if not args.cache_latents:
+            return
+
+        if not args.lowram:
+            logger.info("move text encoder and unet to cpu to save memory")
+            org_text_encoder_device = text_encoders[0].device
+            org_unet_device = unet.device
+            text_encoders[0].to("cpu")
+            unet.to("cpu")
+            clean_memory_on_device(accelerator.device)
+
+        vae.to(accelerator.device, dtype=weight_dtype)
+
+        with torch.no_grad(), accelerator.autocast():
+            dataset.new_cache_latents(vae, accelerator)
+
+        accelerator.wait_for_everyone()
+
+        vae.to("cpu")
+        clean_memory_on_device(accelerator.device)
+
+        if not args.lowram:
+            logger.info("move text encoder and unet back to original device")
+            text_encoders[0].to(org_text_encoder_device)
+            unet.to(org_unet_device)
+
     def prepare_text_encoder_grad_ckpt_workaround(self, index, text_encoder):
         if hasattr(text_encoder, "embed_tokens"):
             text_encoder.embed_tokens.requires_grad_(True)
@@ -153,19 +183,13 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         # Extract dims assuming (B, 1, C, H, W)
         _, _, num_channels_latents, h, w = noisy_model_input.shape
 
-        # QwenImageTransformer2DModel does not expose _pack_latents. Implement locally, matching the pipeline logic.
-        def _pack_latents(latents, batch_size, num_channels_latents, height, width):
-            latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
-            latents = latents.permute(0, 2, 4, 1, 3, 5)
-            latents = latents.reshape(batch_size, (height // 2) * (width // 2), num_channels_latents * 4)
-            return latents
-
-        packed_noisy_model_input = _pack_latents(
+        # pack the latents.
+        packed_noisy_model_input = QwenImagePipeline._pack_latents(
             noisy_model_input,
             bsz,
-            num_channels_latents,
-            h,
-            w,
+            noisy_model_input.shape[2],
+            noisy_model_input.shape[3],
+            noisy_model_input.shape[4],
         )
 
         img_shapes = [[(1, h // 2, w // 2)]] * bsz
@@ -224,18 +248,11 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                 return_dict=False,
             )[0]
 
-        # Implement local unpack to avoid relying on pipeline private methods
-        def _unpack_latents(latents, height, width):
-            batch_size, num_patches, channels = latents.shape
-            latents = latents.view(batch_size, height // 2, width // 2, channels // 4, 2, 2)
-            latents = latents.permute(0, 3, 1, 4, 2, 5).contiguous()
-            latents = latents.view(batch_size, channels // 4, 1, height, width)
-            return latents
-
-        model_pred_5d = _unpack_latents(
+        model_pred_5d = QwenImagePipeline._unpack_latents(
             model_pred_packed,
-            height=h,
-            width=w,
+            height=h * self.vae_scale_factor,
+            width=w * self.vae_scale_factor,
+            vae_scale_factor=self.vae_scale_factor,
         )
         # Convert to (B, C, H, W)
         model_pred = model_pred_5d.squeeze(2)
@@ -255,6 +272,12 @@ def setup_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="path to the text encoder model to use, if different from the main model",
+    )
+    # Memory-saving arguments
+    parser.add_argument(
+        "--use_qfloat8_on_demand",
+        action="store_true",
+        help="[EXPERIMENTAL] quantize the Qwen transformer to qfloat8 on demand to save VRAM",
     )
     # On Windows, default to single-process DataLoader to avoid hangs with Qwen
     if os.name == "nt":
