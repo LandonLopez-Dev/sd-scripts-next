@@ -47,11 +47,14 @@ class QwenLoRANetwork(LoRANetwork):
         def create_modules(prefix, root_module: torch.nn.Module) -> List[LoRAModule]:
             loras = []
             for name, module in root_module.named_modules():
-                if module.__class__.__name__ == "Linear":
-                    if "q_proj" in name or "k_proj" in name or "v_proj" in name or "o_proj" in name:
+                if isinstance(module, torch.nn.Linear):
+                    # Broaden matcher to catch Qwen projection names
+                    if any(t in name for t in ["to_q", "to_k", "to_v", "to_out.0", "q_proj", "k_proj", "v_proj", "o_proj", "proj", "fc1", "fc2"]):
                         lora_name = prefix + '_' + name.replace('.', '_')
-                        lora = LoRAModule(lora_name, module, self.multiplier, self.lora_dim, self.alpha, self.dropout, self.rank_dropout, self.module_dropout)
-                        loras.append(lora)
+                        loras.append(LoRAModule(
+                            lora_name, module, self.multiplier, self.lora_dim, self.alpha,
+                            self.dropout, self.rank_dropout, self.module_dropout
+                        ))
             return loras
 
         text_encoders = text_encoder if isinstance(text_encoder, list) else [text_encoder]

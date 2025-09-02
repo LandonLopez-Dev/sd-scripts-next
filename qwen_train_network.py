@@ -207,7 +207,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
 
         model_pred_packed = unet(
             hidden_states=packed_noisy_model_input,
-            timestep=timesteps / 1000,
+            timestep=sigmas.to(device=pe_device),
             guidance=None,
             encoder_hidden_states_mask=prompt_embeds_mask,
             encoder_hidden_states=prompt_embeds,
@@ -216,27 +216,18 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             return_dict=False,
         )[0]
 
-        # Precondition model output as in flow-matching training (similar to SD3):
-        # f_theta = model * (-sigma) + x_t
-        sigmas_packed = sigmas.view(bsz, 1, 1).to(dtype=model_pred_packed.dtype, device=model_pred_packed.device)
-        model_pred_packed = model_pred_packed * (-sigmas_packed) + packed_noisy_model_input
-
         # Implement local unpack to avoid relying on pipeline private methods
-        def _unpack_latents(latents, height, width, vae_scale_factor):
+        def _unpack_latents(latents, height, width):
             batch_size, num_patches, channels = latents.shape
-            # Make height/width divisible by 2 and VAE scale factor like in pipeline
-            height = 2 * (int(height) // (vae_scale_factor * 2))
-            width = 2 * (int(width) // (vae_scale_factor * 2))
             latents = latents.view(batch_size, height // 2, width // 2, channels // 4, 2, 2)
-            latents = latents.permute(0, 3, 1, 4, 2, 5)
-            latents = latents.reshape(batch_size, channels // (2 * 2), 1, height, width)
+            latents = latents.permute(0, 3, 1, 4, 2, 5).contiguous()
+            latents = latents.view(batch_size, channels // 4, 1, height, width)
             return latents
 
         model_pred_5d = _unpack_latents(
             model_pred_packed,
-            height=h * self.vae_scale_factor,
-            width=w * self.vae_scale_factor,
-            vae_scale_factor=self.vae_scale_factor,
+            height=h,
+            width=w,
         )
         # Convert to (B, C, H, W)
         model_pred = model_pred_5d.squeeze(2)
