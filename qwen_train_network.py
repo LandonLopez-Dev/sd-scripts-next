@@ -147,6 +147,15 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
     def sample_images(self, accelerator, args, epoch, global_step, device, vae, tokenizers, text_encoder, unet):
         qwen_utils.sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, tokenizers[0])
 
+    def prepare_unet_with_accelerator(self, args, accelerator: Accelerator, unet: torch.nn.Module) -> torch.nn.Module:
+        # Avoid wrapping the Qwen transformer with Accelerator when using on-demand qfloat8 quantization.
+        # Some accelerator backends attempt to cast/replicate parameters which can hang with Quanto qfloat8 tensors on Windows.
+        if getattr(args, "use_qfloat8_on_demand", False):
+            # Just move to the correct device; dtype is already handled by caller.
+            logger.info("Skipping accelerator.prepare(unet) due to --use_qfloat8_on_demand; moving model to device directly.")
+            return unet.to(accelerator.device)
+        return super().prepare_unet_with_accelerator(args, accelerator, unet)
+
     def get_noise_pred_and_target(
         self,
         args,
@@ -331,6 +340,12 @@ if __name__ == "__main__":
         logger.info("Windows detected: Forcing max_data_loader_n_workers=0 and disabling persistent workers to prevent hangs.")
         args.max_data_loader_n_workers = 0
         args.persistent_data_loader_workers = False
+        try:
+            import torch
+            torch.set_num_threads(1)
+            logger.info("Set torch.set_num_threads(1) to reduce potential dataloader thread contention on Windows.")
+        except Exception:
+            pass
 
     args = train_util.read_config_from_file(args, parser)
 
