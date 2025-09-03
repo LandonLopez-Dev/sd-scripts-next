@@ -373,7 +373,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                 pass
         if getattr(args, "use_qfloat8_on_demand", False) and new_device.type == "cuda" and not hasattr(unet, "_did_first_forward"):
             try:
-                logger.info("Qwen first real forward (fp32, no autocast, eval-mode) start...")
+                logger.info("Qwen first real forward (autocast+no_grad, eval-mode) start...")
                 was_training = getattr(unet, "training", False)
                 try:
                     unet.eval()
@@ -382,27 +382,29 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                 # Ensure inputs are contiguous to avoid any fragmented views on first call
                 packed_noisy_model_input = packed_noisy_model_input.contiguous()
                 prompt_embeds = prompt_embeds.contiguous()
-                # Run forward on CUDA with fp32 sigmas but without autocast
-                model_pred_packed = unet(
-                    hidden_states=packed_noisy_model_input,
-                    timestep=sigmas.float(),
-                    guidance=None,
-                    encoder_hidden_states_mask=prompt_embeds_mask,
-                    encoder_hidden_states=prompt_embeds,
-                    img_shapes=img_shapes,
-                    txt_seq_lens=txt_seq_lens,
-                    return_dict=False,
-                )[0]
+                # Prefer a safe CUDA forward with autocast and no_grad on Windows for qfloat8
+                with torch.no_grad():
+                    with accelerator.autocast():
+                        model_pred_packed = unet(
+                            hidden_states=packed_noisy_model_input,
+                            timestep=sigmas.float(),
+                            guidance=None,
+                            encoder_hidden_states_mask=prompt_embeds_mask,
+                            encoder_hidden_states=prompt_embeds,
+                            img_shapes=img_shapes,
+                            txt_seq_lens=txt_seq_lens,
+                            return_dict=False,
+                        )[0]
                 try:
                     if was_training:
                         unet.train()
                 except Exception:
                     pass
                 setattr(unet, "_did_first_forward", True)
-                logger.info("Qwen first real forward (fp32, no autocast) completed.")
+                logger.info("Qwen first real forward (autocast+no_grad) completed.")
             except Exception as e:
-                logger.warning(f"Qwen first real forward (no autocast) failed (non-fatal): {e}; attempting CUDA autocast path.")
-                with accelerator.autocast():
+                logger.warning(f"Qwen first real forward (autocast+no_grad) failed (non-fatal): {e}; attempting fp32 no-autocast path.")
+                with torch.no_grad():
                     model_pred_packed = unet(
                         hidden_states=packed_noisy_model_input,
                         timestep=sigmas.float(),
