@@ -76,6 +76,7 @@ def load_qwen_transformer(
         subfolder="transformer",
         torch_dtype=torch_dtype,
     )
+    # For on-demand qfloat8 on Windows we will keep the transformer on CPU until after quantization.
     transformer.to(device)
 
     # Enable gradient checkpointing for Qwen transformer when requested or when using grad accumulation
@@ -103,6 +104,32 @@ def load_qwen_transformer(
     if args is not None and getattr(args, "use_qfloat8_on_demand", False):
         logger.info("Quantizing Qwen transformer on demand to qfloat8")
         transformer = quantize_qwen_transformer_on_demand(transformer, accelerator.device, torch_dtype)
+        # Defer warmup until after first explicit move to CUDA to avoid hidden device transitions here.
+        try:
+            setattr(transformer, "_defer_move_device", accelerator.device)
+            setattr(transformer, "_defer_move_dtype", torch_dtype)
+            logger.info("Deferred moving quantized transformer to CUDA until first forward.")
+        except Exception:
+            pass
+
+        # On Windows with qfloat8, disable gradient checkpointing for the transformer to avoid potential deadlocks
+        try:
+            import os as _os
+            if _os.name == "nt":
+                # Also disable torch.compile on Windows which can interact poorly with quanto quantization
+                try:
+                    if hasattr(torch, "_dynamo"):
+                        torch._dynamo.config.suppress_errors = True
+                        torch._dynamo.reset()
+                except Exception:
+                    pass
+                if hasattr(transformer, "gradient_checkpointing_disable"):
+                    transformer.gradient_checkpointing_disable()
+                elif hasattr(transformer, "gradient_checkpointing"):
+                    transformer.gradient_checkpointing = False
+                logger.info("Disabled gradient checkpointing (and reset torch.compile) for Qwen transformer due to --use_qfloat8_on_demand on Windows.")
+        except Exception as e:
+            logger.warning(f"Failed to disable gradient checkpointing (non-fatal): {e}")
 
     return transformer
 
@@ -125,15 +152,27 @@ def quantize_qwen_transformer_on_demand(transformer, device, dtype):
             if module is not None:
                 modules_to_quantize.append(module)
 
-    # Move the entire transformer to the target device before quantization
-    transformer.to(device, dtype=dtype)
+    # Perform quantization on CPU to avoid CUDA deadlocks on Windows, then move back to target device
+    target_device = device
+    transformer.to("cpu")
 
-    logger.info(f"Quantizing {len(modules_to_quantize)} modules to qfloat8 on device: {device}...")
-    for module in tqdm(modules_to_quantize, desc="Quantizing modules"):
-        quantize(module, weights=qfloat8)
-        freeze(module)
+    logger.info(f"Quantizing {len(modules_to_quantize)} modules to qfloat8 on device: cpu...")
+    # Ensure eval mode to avoid hooks/state changes during quantization which may deadlock on Windows + CUDA
+    was_training = transformer.training
+    try:
+        transformer.eval()
+        for module in tqdm(modules_to_quantize, desc="Quantizing modules"):
+            quantize(module, weights=qfloat8)
+            freeze(module)
+    finally:
+        if was_training:
+            transformer.train()
 
-    logger.info("Quantization complete. The quantized transformer remains on its target device.")
+    # Defer moving the quantized model to CUDA to avoid Windows hangs; keep on CPU until first forward
+    try:
+        logger.info("Quantization complete. Keeping transformer on CPU to defer CUDA initialization.")
+    except Exception:
+        pass
     return transformer
 
 
@@ -186,7 +225,12 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
         tokenizer=tokenizer,
         scheduler=scheduler,
     )
-    pipeline.to(accelerator.device)
+    # Avoid moving the quantized transformer; move only VAE and text encoder when on-demand qfloat8 is used.
+    if getattr(args, "use_qfloat8_on_demand", False):
+        vae.to(accelerator.device)
+        text_encoder.to(accelerator.device)
+    else:
+        pipeline.to(accelerator.device)
 
     prompts = train_util.load_prompts(args.sample_prompts)
     with torch.no_grad(), accelerator.autocast():

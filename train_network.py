@@ -1394,15 +1394,19 @@ class NetworkTrainer:
                 initial_step = 1
 
             for step, batch in enumerate(skipped_dataloader or train_dataloader):
+                logger.info(f"Step loop entered: epoch={epoch+1}, step={step}, global_step={global_step}")
                 current_step.value = global_step
                 if initial_step > 0:
                     initial_step -= 1
                     continue
 
                 with accelerator.accumulate(training_model):
+                    logger.info("on_step_start_for_network begin")
                     on_step_start_for_network(text_encoder, unet)
+                    logger.info("on_step_start_for_network end")
 
                     # preprocess batch for each model
+                    logger.info("Qwen process_batch begin")
                     self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=True)
 
                     loss = self.process_batch(
@@ -1422,6 +1426,7 @@ class NetworkTrainer:
                         train_text_encoder=train_text_encoder,
                         train_unet=train_unet,
                     )
+                    logger.info("Qwen process_batch end")
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
