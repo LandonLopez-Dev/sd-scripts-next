@@ -432,11 +432,11 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         model_pred = model_pred_5d.squeeze(2)
         del model_pred_5d
 
-        # Build target for flow-matching: the clean latents in the same layout as model_pred
-        # Convert latents (B, 1, C, H, W) -> (B, C, H, W)
-        # These are inputs; ensure they don't hold graph history and reduce precision to weight_dtype when safe
+        # Build target for flow-matching: the flow from noise to clean latents
+        # Target is (noise - latents)
         with torch.no_grad():
-            target = latents.permute(0, 2, 1, 3, 4).squeeze(2)
+            flow = noise - latents  # (B, 1, C, H, W)
+            target = flow.squeeze(1)  # (B, C, H, W)
             if target.dtype != weight_dtype:
                 target = target.to(dtype=weight_dtype)
 
