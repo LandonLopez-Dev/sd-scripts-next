@@ -192,19 +192,16 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         is_train=True,
     ):
         bsz = latents.shape[0]
-        logger.info("Qwen get_noise_pred_and_target begin")
 
         # Ensure latents layout matches Qwen pipeline expectations: (B, 1, C, H, W)
         # Commonly our VAE produces (B, C, 1, H, W). If so, permute to (B, 1, C, H, W).
         if latents.dim() == 5 and latents.shape[2] == 1 and latents.shape[1] != 1:
             # Already (B, C, 1, H, W) -> (B, 1, C, H, W)
             latents = latents.permute(0, 2, 1, 3, 4).contiguous()
-        logger.info("Qwen preflight: latents layout prepared")
 
         # Ensure latents are in compute dtype to avoid implicit upcasts and larger buffers
         if latents.dtype != weight_dtype:
             latents = latents.to(dtype=weight_dtype)
-        logger.info("Qwen preflight: latents cast")
 
         # On Windows with qfloat8, build preflight tensors on CPU to avoid first CUDA ops before UNet forward
         cpu_preflight = getattr(args, "use_qfloat8_on_demand", False) and (latents.device.type == "cuda")
@@ -212,21 +209,17 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
 
         latents_cpu = latents.to("cpu") if cpu_preflight else latents
         noise = torch.randn_like(latents_cpu, device=work_device, dtype=weight_dtype)
-        logger.info("Qwen preflight: noise sampled")
 
         # Sample continuous t in [0,1] for flow-matching and also create discrete indices for logging/compat
         t = torch.rand(bsz, device=work_device, dtype=latents_cpu.dtype)
         indices = (t * noise_scheduler.config.num_train_timesteps).long().clamp_max(noise_scheduler.config.num_train_timesteps - 1)
-        logger.info("Qwen preflight: timesteps (t) sampled and indices computed")
         # Keep scheduler buffers on CPU and only gather the indexed values to GPU to avoid large persistent GPU tensors
         indices_cpu = indices.to("cpu")
         # gather on CPU first to keep everything on host for preflight
         timesteps = noise_scheduler.timesteps[indices_cpu].to(device=work_device)
-        logger.info("Qwen preflight: discrete timesteps gathered")
 
         t_5d = t.view(bsz, 1, 1, 1, 1)
         noisy_model_input = (1.0 - t_5d) * (latents_cpu if cpu_preflight else latents) + t_5d * noise
-        logger.info("Qwen preflight: noisy input built (flow-matching with t)")
 
         # Extract dims assuming (B, 1, C, H, W)
         _, _, num_channels_latents, h, w = noisy_model_input.shape
@@ -239,7 +232,6 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             noisy_model_input.shape[3],
             noisy_model_input.shape[4],
         )
-        logger.info("Qwen preflight: latents packed")
 
         img_shapes = [[(1, h // 2, w // 2)]] * bsz
 
@@ -285,20 +277,21 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         t = t.to(device=pe_device, dtype=pe_dtype)
 
         # Run Qwen forward under Accelerate's autocast so it respects --mixed_precision
-        logger.info(f"Qwen forward start: device={pe_device}, dtype={pe_dtype}, latents={tuple(packed_noisy_model_input.shape)}, txt={tuple(prompt_embeds.shape)}")
         # Perform deferred safe move of the transformer to CUDA just before first use
         if getattr(args, "use_qfloat8_on_demand", False) and hasattr(unet, "_defer_move_device"):
+            logger.debug(
+                f"Qwen forward start: device={pe_device}, dtype={pe_dtype}, latents={tuple(packed_noisy_model_input.shape)}, txt={tuple(prompt_embeds.shape)}")
             try:
                 dev = getattr(unet, "_defer_move_device")
                 dt = getattr(unet, "_defer_move_dtype", None)
-                logger.info(f"Deferred move: moving quantized Qwen transformer to {dev} now.")
+                logger.debug(f"Deferred move: moving quantized Qwen transformer to {dev} now.")
                 unet.to(dev, dtype=dt)
                 delattr(unet, "_defer_move_device")
                 if hasattr(unet, "_defer_move_dtype"):
                     delattr(unet, "_defer_move_dtype")
                 if dev.type == "cuda":
                     torch.cuda.synchronize(dev)
-                logger.info("Deferred move completed.")
+                logger.debug("Deferred move completed.")
             except Exception as e:
                 logger.warning(f"Deferred move failed (will proceed anyway): {e}")
         # After deferred move, re-align inputs to the UNet's new device/dtype before forward
@@ -321,7 +314,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             timesteps = timesteps.to(device=new_device, non_blocking=True)
         if t.device != new_device or t.dtype != new_dtype:
             t = t.to(device=new_device, dtype=new_dtype, non_blocking=True)
-        logger.info(f"Realigned inputs to device={new_device}, dtype={new_dtype} after deferred move.")
+        logger.debug(f"Realigned inputs to device={new_device}, dtype={new_dtype} after deferred move.")
 
         # One-time safe warmup to initialize CUDA kernels for qfloat8 on Windows before the real forward
         if getattr(args, "use_qfloat8_on_demand", False) and new_device.type == "cuda" and not hasattr(unet, "_did_safe_warmup"):
@@ -337,7 +330,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             except Exception:
                 pass
             try:
-                logger.info("CUDA preflight sync A (before warmup)...")
+                logger.debug("CUDA preflight sync A (before warmup)...")
                 # Ensure all pending async copies complete before warmup
                 torch.cuda.synchronize(new_device)
                 # Perform a tiny CUDA matmul to initialize cuBLAS handles outside the model
@@ -346,10 +339,10 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                     b = torch.zeros((1, 1), device=new_device, dtype=torch.float32)
                     _ = a @ b
                     torch.cuda.synchronize(new_device)
-                    logger.info("cuBLAS tiny matmul warmup completed.")
+                    logger.debug("cuBLAS tiny matmul warmup completed.")
                 except Exception as _e:
                     logger.warning(f"cuBLAS tiny matmul warmup failed (non-fatal): {_e}")
-                logger.info("Skipping Qwen safe warmup on Windows; proceeding to real forward.")
+                logger.debug("Skipping Qwen safe warmup on Windows; proceeding to real forward.")
                 setattr(unet, "_did_safe_warmup", True)
             except Exception as e:
                 logger.warning(f"Qwen safe warmup forward failed (non-fatal): {e}")
@@ -365,13 +358,13 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         # Ensure device is synchronized right before actual forward to avoid stream hazards on first call
         if getattr(args, "use_qfloat8_on_demand", False) and new_device.type == "cuda":
             try:
-                logger.info("CUDA preflight sync C (before real forward)...")
+                logger.debug("CUDA preflight sync C (before real forward)...")
                 torch.cuda.synchronize(new_device)
             except Exception:
                 pass
         if getattr(args, "use_qfloat8_on_demand", False) and new_device.type == "cuda" and not hasattr(unet, "_did_first_forward"):
             try:
-                logger.info("Qwen first real forward (autocast+no_grad, eval-mode) start...")
+                logger.debug("Qwen first real forward (autocast+no_grad, eval-mode) start...")
                 was_training = getattr(unet, "training", False)
                 try:
                     unet.eval()
@@ -399,7 +392,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                 except Exception:
                     pass
                 setattr(unet, "_did_first_forward", True)
-                logger.info("Qwen first real forward (autocast+no_grad) completed.")
+                logger.debug("Qwen first real forward (autocast+no_grad) completed.")
             except Exception as e:
                 logger.warning(f"Qwen first real forward (autocast+no_grad) failed (non-fatal): {e}; attempting fp32 no-autocast path.")
                 with torch.no_grad():
@@ -425,7 +418,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                     txt_seq_lens=txt_seq_lens,
                     return_dict=False,
                 )[0]
-        logger.info("Qwen forward end")
+        logger.debug("Qwen forward end")
 
         model_pred_5d = QwenImagePipeline._unpack_latents(
             model_pred_packed,
@@ -472,7 +465,6 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         except Exception:
             pass
 
-        logger.info("Qwen get_noise_pred_and_target end")
         return model_pred, target, timesteps, None
 
 
