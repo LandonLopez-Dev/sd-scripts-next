@@ -614,24 +614,7 @@ class NetworkTrainer:
             accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
 
         # 学習を準備する
-        # 必要ならテキストエンコーダーの出力をキャッシュする: Text Encoderはcpuまたはgpuへ移される
-        # cache text encoder outputs if needed: Text Encoder is moved to cpu or gpu
-        text_encoding_strategy = self.get_text_encoding_strategy(args)
-        strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
-
-        text_encoder_outputs_caching_strategy = self.get_text_encoder_outputs_caching_strategy(args)
-        if text_encoder_outputs_caching_strategy is not None:
-            strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_outputs_caching_strategy)
-        self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, train_dataset_group, weight_dtype)
-        if val_dataset_group is not None:
-            self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, val_dataset_group, weight_dtype)
-
-        # Latent caching
-        if hasattr(self, "cache_latents_if_needed"):
-            self.cache_latents_if_needed(args, accelerator, unet, vae, text_encoders, train_dataset_group, weight_dtype)
-            if val_dataset_group is not None:
-                self.cache_latents_if_needed(args, accelerator, unet, vae, text_encoders, val_dataset_group, weight_dtype)
-        elif cache_latents:
+        if cache_latents:
             vae.to(accelerator.device, dtype=vae_dtype)
             vae.requires_grad_(False)
             vae.eval()
@@ -644,6 +627,18 @@ class NetworkTrainer:
             clean_memory_on_device(accelerator.device)
 
             accelerator.wait_for_everyone()
+
+        # 必要ならテキストエンコーダーの出力をキャッシュする: Text Encoderはcpuまたはgpuへ移される
+        # cache text encoder outputs if needed: Text Encoder is moved to cpu or gpu
+        text_encoding_strategy = self.get_text_encoding_strategy(args)
+        strategy_base.TextEncodingStrategy.set_strategy(text_encoding_strategy)
+
+        text_encoder_outputs_caching_strategy = self.get_text_encoder_outputs_caching_strategy(args)
+        if text_encoder_outputs_caching_strategy is not None:
+            strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_outputs_caching_strategy)
+        self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, train_dataset_group, weight_dtype)
+        if val_dataset_group is not None:
+            self.cache_text_encoder_outputs_if_needed(args, accelerator, unet, vae, text_encoders, val_dataset_group, weight_dtype)
 
         # prepare network
         net_kwargs = {}
@@ -1394,19 +1389,15 @@ class NetworkTrainer:
                 initial_step = 1
 
             for step, batch in enumerate(skipped_dataloader or train_dataloader):
-                logger.info(f"Step loop entered: epoch={epoch+1}, step={step}, global_step={global_step}")
                 current_step.value = global_step
                 if initial_step > 0:
                     initial_step -= 1
                     continue
 
                 with accelerator.accumulate(training_model):
-                    logger.info("on_step_start_for_network begin")
                     on_step_start_for_network(text_encoder, unet)
-                    logger.info("on_step_start_for_network end")
 
                     # preprocess batch for each model
-                    logger.info("Qwen process_batch begin")
                     self.on_step_start(args, accelerator, network, text_encoders, unet, batch, weight_dtype, is_train=True)
 
                     loss = self.process_batch(
@@ -1426,7 +1417,6 @@ class NetworkTrainer:
                         train_text_encoder=train_text_encoder,
                         train_unet=train_unet,
                     )
-                    logger.info("Qwen process_batch end")
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:
