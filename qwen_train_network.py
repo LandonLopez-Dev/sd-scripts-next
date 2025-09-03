@@ -214,21 +214,19 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         noise = torch.randn_like(latents_cpu, device=work_device, dtype=weight_dtype)
         logger.info("Qwen preflight: noise sampled")
 
-        u = torch.rand(bsz, device=work_device)
-        indices = (u * noise_scheduler.config.num_train_timesteps).long()
-        logger.info("Qwen preflight: timesteps indices computed")
+        # Sample continuous t in [0,1] for flow-matching and also create discrete indices for logging/compat
+        t = torch.rand(bsz, device=work_device, dtype=latents_cpu.dtype)
+        indices = (t * noise_scheduler.config.num_train_timesteps).long().clamp_max(noise_scheduler.config.num_train_timesteps - 1)
+        logger.info("Qwen preflight: timesteps (t) sampled and indices computed")
         # Keep scheduler buffers on CPU and only gather the indexed values to GPU to avoid large persistent GPU tensors
         indices_cpu = indices.to("cpu")
         # gather on CPU first to keep everything on host for preflight
         timesteps = noise_scheduler.timesteps[indices_cpu].to(device=work_device)
-        logger.info("Qwen preflight: timesteps gathered")
+        logger.info("Qwen preflight: discrete timesteps gathered")
 
-        sigmas = noise_scheduler.sigmas[indices_cpu].to(device=work_device, dtype=latents_cpu.dtype)
-        sigmas_5d = sigmas.view(bsz, 1, 1, 1, 1)
-        logger.info("Qwen preflight: sigmas prepared")
-
-        noisy_model_input = (1.0 - sigmas_5d) * (latents_cpu if cpu_preflight else latents) + sigmas_5d * noise
-        logger.info("Qwen preflight: noisy input built")
+        t_5d = t.view(bsz, 1, 1, 1, 1)
+        noisy_model_input = (1.0 - t_5d) * (latents_cpu if cpu_preflight else latents) + t_5d * noise
+        logger.info("Qwen preflight: noisy input built (flow-matching with t)")
 
         # Extract dims assuming (B, 1, C, H, W)
         _, _, num_channels_latents, h, w = noisy_model_input.shape
@@ -282,9 +280,9 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         if prompt_embeds_mask.shape[1] != max_valid_len:
             prompt_embeds_mask = prompt_embeds_mask[:, :max_valid_len]
 
-        # Also ensure timesteps and sigmas reside on same device; if we preflighted on CPU, this is first CUDA hop
+        # Also ensure t and discrete timesteps reside on same device; if we preflighted on CPU, this is first CUDA hop
         timesteps = timesteps.to(device=pe_device)
-        sigmas = sigmas.to(device=pe_device, dtype=pe_dtype)
+        t = t.to(device=pe_device, dtype=pe_dtype)
 
         # Run Qwen forward under Accelerate's autocast so it respects --mixed_precision
         logger.info(f"Qwen forward start: device={pe_device}, dtype={pe_dtype}, latents={tuple(packed_noisy_model_input.shape)}, txt={tuple(prompt_embeds.shape)}")
@@ -321,8 +319,8 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             prompt_embeds_mask = prompt_embeds_mask.to(device=new_device, non_blocking=True)
         if timesteps.device != new_device:
             timesteps = timesteps.to(device=new_device, non_blocking=True)
-        if sigmas.device != new_device or sigmas.dtype != new_dtype:
-            sigmas = sigmas.to(device=new_device, dtype=new_dtype, non_blocking=True)
+        if t.device != new_device or t.dtype != new_dtype:
+            t = t.to(device=new_device, dtype=new_dtype, non_blocking=True)
         logger.info(f"Realigned inputs to device={new_device}, dtype={new_dtype} after deferred move.")
 
         # One-time safe warmup to initialize CUDA kernels for qfloat8 on Windows before the real forward
@@ -387,7 +385,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                     with accelerator.autocast():
                         model_pred_packed = unet(
                             hidden_states=packed_noisy_model_input,
-                            timestep=sigmas.float(),
+                            timestep=t.float(),
                             guidance=None,
                             encoder_hidden_states_mask=prompt_embeds_mask,
                             encoder_hidden_states=prompt_embeds,
@@ -407,7 +405,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                 with torch.no_grad():
                     model_pred_packed = unet(
                         hidden_states=packed_noisy_model_input,
-                        timestep=sigmas.float(),
+                        timestep=t.float(),
                         guidance=None,
                         encoder_hidden_states_mask=prompt_embeds_mask,
                         encoder_hidden_states=prompt_embeds,
@@ -419,7 +417,7 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             with accelerator.autocast():
                 model_pred_packed = unet(
                     hidden_states=packed_noisy_model_input,
-                    timestep=sigmas,
+                    timestep=t,
                     guidance=None,
                     encoder_hidden_states_mask=prompt_embeds_mask,
                     encoder_hidden_states=prompt_embeds,
@@ -451,12 +449,11 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
 
         # Free intermediates that are no longer needed to prevent VRAM bloat
         del noisy_model_input
-        del sigmas_5d
-        del sigmas
+        del t_5d
+        del t
         del indices
         if 'indices_cpu' in locals():
             del indices_cpu
-        del u
         del noise
         if 'packed_noisy_model_input' in locals():
             del packed_noisy_model_input
