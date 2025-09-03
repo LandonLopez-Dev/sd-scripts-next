@@ -272,6 +272,19 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         if prompt_embeds_mask.shape[1] != max_valid_len:
             prompt_embeds_mask = prompt_embeds_mask[:, :max_valid_len]
 
+        # Recompute txt_seq_lens after slicing to ensure consistency with actual sequence length
+        if prompt_embeds_mask.dtype != torch.bool:
+            prompt_embeds_mask = prompt_embeds_mask.to(torch.bool)
+        txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+        # Defensive guards: ensure no length exceeds current tensor length
+        try:
+            cur_len = int(prompt_embeds.shape[1])
+            if any(l > cur_len for l in txt_seq_lens):
+                # Clamp any overflow just in case
+                txt_seq_lens = [min(int(l), cur_len) for l in txt_seq_lens]
+        except Exception:
+            pass
+
         # Also ensure t and discrete timesteps reside on same device; if we preflighted on CPU, this is first CUDA hop
         timesteps = timesteps.to(device=pe_device)
         t = t.to(device=pe_device, dtype=pe_dtype)
@@ -408,9 +421,14 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
                     )[0]
         else:
             with accelerator.autocast():
+                # Ensure contiguity before forward to avoid unexpected view semantics
+                if not packed_noisy_model_input.is_contiguous():
+                    packed_noisy_model_input = packed_noisy_model_input.contiguous()
+                if not prompt_embeds.is_contiguous():
+                    prompt_embeds = prompt_embeds.contiguous()
                 model_pred_packed = unet(
                     hidden_states=packed_noisy_model_input,
-                    timestep=t,
+                    timestep=t.float(),
                     guidance=None,
                     encoder_hidden_states_mask=prompt_embeds_mask,
                     encoder_hidden_states=prompt_embeds,

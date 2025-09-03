@@ -218,6 +218,63 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
         "use_karras_sigmas": False,
     }
     scheduler = FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
+    # Normalize modules in case lists/tuples were passed from callers
+    if isinstance(text_encoder, (list, tuple)):
+        if len(text_encoder) == 0:
+            raise ValueError("text_encoder list/tuple is empty; expected a text encoder module")
+        text_encoder = text_encoder[0]
+    if isinstance(unet, (list, tuple)):
+        if len(unet) == 0:
+            raise ValueError("unet list/tuple is empty; expected a transformer module")
+        unet = unet[0]
+    if isinstance(tokenizer, (list, tuple)):
+        if len(tokenizer) == 0:
+            tokenizer = None
+        else:
+            tokenizer = tokenizer[0]
+
+    # Unwrap models like sd3/flux to operate on base modules during sampling
+    try:
+        unet = accelerator.unwrap_model(unet)
+    except Exception:
+        pass
+    try:
+        if text_encoder is not None:
+            text_encoder = accelerator.unwrap_model(text_encoder)
+    except Exception:
+        pass
+
+    # Temporarily switch UNet to eval and optionally disable grad checkpointing during sampling (sd3/flux style)
+    was_training = getattr(unet, "training", False)
+    ckpt_prev_state = None
+    try:
+        if hasattr(unet, "gradient_checkpointing_disable"):
+            # Some diffusers models expose enable/disable methods
+            ckpt_prev_state = True
+            try:
+                if hasattr(unet, "gradient_checkpointing"):  # remember bool flag if present
+                    ckpt_prev_state = bool(getattr(unet, "gradient_checkpointing"))
+            except Exception:
+                pass
+            try:
+                unet.gradient_checkpointing_disable()
+            except Exception:
+                pass
+        elif hasattr(unet, "gradient_checkpointing"):
+            # Fall back to toggling the attribute
+            try:
+                ckpt_prev_state = bool(unet.gradient_checkpointing)
+                unet.gradient_checkpointing = False
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        unet.eval()
+    except Exception:
+        pass
+
     pipeline = QwenImagePipeline(
         vae=vae,
         text_encoder=text_encoder,
@@ -225,6 +282,12 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
         tokenizer=tokenizer,
         scheduler=scheduler,
     )
+    # Ensure prompt max length during sampling matches training clamp to avoid internal cache shape drift
+    try:
+        if hasattr(pipeline, "encode_prompt"):
+            pipeline.default_max_sequence_length = 512  # custom attribute used by our wrapper below if any
+    except Exception:
+        pass
     # Avoid moving the quantized transformer; move only VAE and text encoder when on-demand qfloat8 is used.
     if getattr(args, "use_qfloat8_on_demand", False):
         vae.to(accelerator.device)
@@ -265,4 +328,47 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
             image.save(os.path.join(output_dir, filename))
 
     pipeline.to("cpu")
+    # Explicitly delete pipeline to free any references promptly
+    del pipeline
+
+    # Attempt to clear any internal caches/state in the Qwen transformer to avoid shape drift after sampling
+    try:
+        # Common patterns across diffusers models
+        if hasattr(unet, "clear_kv_cache") and callable(getattr(unet, "clear_kv_cache")):
+            unet.clear_kv_cache()
+        if hasattr(unet, "_clear_cache") and callable(getattr(unet, "_clear_cache")):
+            unet._clear_cache()
+        # Some implementations keep attention caches or rotary caches per-block
+        if hasattr(unet, "transformer_blocks"):
+            for blk in unet.transformer_blocks:
+                for attr_name in ("kv_cache", "_kv_cache", "attn_cache", "cache", "_attn_bias", "attn_bias"):
+                    if hasattr(blk, attr_name):
+                        try:
+                            setattr(blk, attr_name, None)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+    # Restore UNet states after sampling
+    try:
+        if was_training:
+            unet.train()
+    except Exception:
+        pass
+    try:
+        if ckpt_prev_state is not None:
+            if hasattr(unet, "gradient_checkpointing_enable") and ckpt_prev_state:
+                try:
+                    unet.gradient_checkpointing_enable()
+                except Exception:
+                    pass
+            elif hasattr(unet, "gradient_checkpointing"):
+                try:
+                    unet.gradient_checkpointing = bool(ckpt_prev_state)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     train_util.clean_memory_on_device(accelerator.device)
