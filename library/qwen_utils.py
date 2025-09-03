@@ -1,5 +1,6 @@
 import os
 import random
+import copy
 import math
 import torch
 from diffusers import (
@@ -244,41 +245,47 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
     except Exception:
         pass
 
+    # Create deep copies of the models for sampling to avoid state corruption
+    unet_for_sampling = copy.deepcopy(unet)
+    text_encoder_for_sampling = copy.deepcopy(text_encoder) if text_encoder is not None else None
+
     # Temporarily switch UNet to eval and optionally disable grad checkpointing during sampling (sd3/flux style)
     was_training = getattr(unet, "training", False)
     ckpt_prev_state = None
     try:
-        if hasattr(unet, "gradient_checkpointing_disable"):
+        if hasattr(unet_for_sampling, "gradient_checkpointing_disable"):
             # Some diffusers models expose enable/disable methods
             ckpt_prev_state = True
             try:
-                if hasattr(unet, "gradient_checkpointing"):  # remember bool flag if present
-                    ckpt_prev_state = bool(getattr(unet, "gradient_checkpointing"))
+                if hasattr(unet_for_sampling, "gradient_checkpointing"):  # remember bool flag if present
+                    ckpt_prev_state = bool(getattr(unet_for_sampling, "gradient_checkpointing"))
             except Exception:
                 pass
             try:
-                unet.gradient_checkpointing_disable()
+                unet_for_sampling.gradient_checkpointing_disable()
             except Exception:
                 pass
-        elif hasattr(unet, "gradient_checkpointing"):
+        elif hasattr(unet_for_sampling, "gradient_checkpointing"):
             # Fall back to toggling the attribute
             try:
-                ckpt_prev_state = bool(unet.gradient_checkpointing)
-                unet.gradient_checkpointing = False
+                ckpt_prev_state = bool(unet_for_sampling.gradient_checkpointing)
+                unet_for_sampling.gradient_checkpointing = False
             except Exception:
                 pass
     except Exception:
         pass
 
     try:
-        unet.eval()
+        unet_for_sampling.eval()
+        if text_encoder_for_sampling is not None:
+            text_encoder_for_sampling.eval()
     except Exception:
         pass
 
     pipeline = QwenImagePipeline(
         vae=vae,
-        text_encoder=text_encoder,
-        transformer=unet,
+        text_encoder=text_encoder_for_sampling,
+        transformer=unet_for_sampling,
         tokenizer=tokenizer,
         scheduler=scheduler,
     )
@@ -328,47 +335,12 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
             image.save(os.path.join(output_dir, filename))
 
     pipeline.to("cpu")
-    # Explicitly delete pipeline to free any references promptly
+    # Explicitly delete pipeline and copies to free any references promptly
     del pipeline
+    del unet_for_sampling
+    if 'text_encoder_for_sampling' in locals() and text_encoder_for_sampling is not None:
+        del text_encoder_for_sampling
 
-    # Attempt to clear any internal caches/state in the Qwen transformer to avoid shape drift after sampling
-    try:
-        # Common patterns across diffusers models
-        if hasattr(unet, "clear_kv_cache") and callable(getattr(unet, "clear_kv_cache")):
-            unet.clear_kv_cache()
-        if hasattr(unet, "_clear_cache") and callable(getattr(unet, "_clear_cache")):
-            unet._clear_cache()
-        # Some implementations keep attention caches or rotary caches per-block
-        if hasattr(unet, "transformer_blocks"):
-            for blk in unet.transformer_blocks:
-                for attr_name in ("kv_cache", "_kv_cache", "attn_cache", "cache", "_attn_bias", "attn_bias"):
-                    if hasattr(blk, attr_name):
-                        try:
-                            setattr(blk, attr_name, None)
-                        except Exception:
-                            pass
-    except Exception:
-        pass
-
-    # Restore UNet states after sampling
-    try:
-        if was_training:
-            unet.train()
-    except Exception:
-        pass
-    try:
-        if ckpt_prev_state is not None:
-            if hasattr(unet, "gradient_checkpointing_enable") and ckpt_prev_state:
-                try:
-                    unet.gradient_checkpointing_enable()
-                except Exception:
-                    pass
-            elif hasattr(unet, "gradient_checkpointing"):
-                try:
-                    unet.gradient_checkpointing = bool(ckpt_prev_state)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    # Original models are untouched, no need to restore state or clear cache.
 
     train_util.clean_memory_on_device(accelerator.device)
