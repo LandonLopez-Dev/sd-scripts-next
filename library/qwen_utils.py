@@ -1,6 +1,5 @@
 import os
 import random
-import copy
 import math
 import torch
 from diffusers import (
@@ -14,11 +13,29 @@ from PIL import Image
 import numpy as np
 from . import train_util
 from library.utils import setup_logging
+from tqdm import tqdm
 
 setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _pack_latents(latents, batch_size, num_channels_latents, height, width):
+    latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
+    latents = latents.permute(0, 2, 4, 1, 3, 5)
+    latents = latents.reshape(batch_size, height // 2 * width // 2, num_channels_latents * 4)
+    return latents
+
+
+def _unpack_latents(latents, batch_size, height, width, num_channels_latents):
+    h = height // 2
+    w = width // 2
+    latents = latents.view(batch_size, h, w, num_channels_latents, 2, 2)
+    latents = latents.permute(0, 3, 1, 4, 2, 5)
+    latents = latents.reshape(batch_size, num_channels_latents, height, width)
+    latents = latents.unsqueeze(1)
+    return latents
 
 
 def load_qwen_text_encoder(model_name_or_path, torch_dtype, device, custom_text_encoder_path=None):
@@ -199,148 +216,143 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
                 return
 
     logger.info("")
-    logger.info(f"generating sample images at step / サンプル画像生成 ステップ: {steps}")
+    logger.info(f"generating sample images at step {global_step} (manual loop)")
 
-    # Create a new pipeline for sampling from the standalone components
-    scheduler_config = {
-        "base_image_seq_len": 256,
-        "base_shift": math.log(3),
-        "invert_sigmas": False,
-        "max_image_seq_len": 8192,
-        "max_shift": math.log(3),
-        "num_train_timesteps": 1000,
-        "shift": 1.0,
-        "shift_terminal": None,
-        "stochastic_sampling": False,
-        "time_shift_type": "exponential",
-        "use_beta_sigmas": False,
-        "use_dynamic_shifting": True,
-        "use_exponential_sigmas": False,
-        "use_karras_sigmas": False,
-    }
-    scheduler = FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
-    # Normalize modules in case lists/tuples were passed from callers
-    if isinstance(text_encoder, (list, tuple)):
-        if len(text_encoder) == 0:
-            raise ValueError("text_encoder list/tuple is empty; expected a text encoder module")
-        text_encoder = text_encoder[0]
-    if isinstance(unet, (list, tuple)):
-        if len(unet) == 0:
-            raise ValueError("unet list/tuple is empty; expected a transformer module")
-        unet = unet[0]
-    if isinstance(tokenizer, (list, tuple)):
-        if len(tokenizer) == 0:
-            tokenizer = None
-        else:
-            tokenizer = tokenizer[0]
-
-    # Unwrap models like sd3/flux to operate on base modules during sampling
+    # Unwrap models
     try:
         unet = accelerator.unwrap_model(unet)
-    except Exception:
-        pass
-    try:
+        vae = accelerator.unwrap_model(vae)
         if text_encoder is not None:
             text_encoder = accelerator.unwrap_model(text_encoder)
     except Exception:
         pass
 
-    # Create deep copies of the models for sampling to avoid state corruption
-    unet_for_sampling = copy.deepcopy(unet)
-    text_encoder_for_sampling = copy.deepcopy(text_encoder) if text_encoder is not None else None
+    # Normalize modules in case lists/tuples were passed from callers
+    if isinstance(text_encoder, (list, tuple)):
+        text_encoder = text_encoder[0] if len(text_encoder) > 0 else None
+    if isinstance(unet, (list, tuple)):
+        unet = unet[0] if len(unet) > 0 else None
+    if isinstance(tokenizer, (list, tuple)):
+        tokenizer = tokenizer[0] if len(tokenizer) > 0 else None
+    if unet is None or tokenizer is None or text_encoder is None or vae is None:
+        logger.error("unet, tokenizer, text_encoder, or vae is None, cannot generate sample images.")
+        return
 
-    # Temporarily switch UNet to eval and optionally disable grad checkpointing during sampling (sd3/flux style)
-    was_training = getattr(unet, "training", False)
-    ckpt_prev_state = None
-    try:
-        if hasattr(unet_for_sampling, "gradient_checkpointing_disable"):
-            # Some diffusers models expose enable/disable methods
-            ckpt_prev_state = True
-            try:
-                if hasattr(unet_for_sampling, "gradient_checkpointing"):  # remember bool flag if present
-                    ckpt_prev_state = bool(getattr(unet_for_sampling, "gradient_checkpointing"))
-            except Exception:
-                pass
-            try:
-                unet_for_sampling.gradient_checkpointing_disable()
-            except Exception:
-                pass
-        elif hasattr(unet_for_sampling, "gradient_checkpointing"):
-            # Fall back to toggling the attribute
-            try:
-                ckpt_prev_state = bool(unet_for_sampling.gradient_checkpointing)
-                unet_for_sampling.gradient_checkpointing = False
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Model state management
+    was_training_unet = unet.training
+    was_training_encoder = text_encoder.training
+    unet.eval()
+    text_encoder.eval()
+    vae.eval()
 
-    try:
-        unet_for_sampling.eval()
-        if text_encoder_for_sampling is not None:
-            text_encoder_for_sampling.eval()
-    except Exception:
-        pass
-
-    pipeline = QwenImagePipeline(
-        vae=vae,
-        text_encoder=text_encoder_for_sampling,
-        transformer=unet_for_sampling,
-        tokenizer=tokenizer,
-        scheduler=scheduler,
-    )
-    # Ensure prompt max length during sampling matches training clamp to avoid internal cache shape drift
-    try:
-        if hasattr(pipeline, "encode_prompt"):
-            pipeline.default_max_sequence_length = 512  # custom attribute used by our wrapper below if any
-    except Exception:
-        pass
-    # Avoid moving the quantized transformer; move only VAE and text encoder when on-demand qfloat8 is used.
-    if getattr(args, "use_qfloat8_on_demand", False):
-        vae.to(accelerator.device)
-        text_encoder.to(accelerator.device)
-    else:
-        pipeline.to(accelerator.device)
+    # Scheduler setup
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
     prompts = train_util.load_prompts(args.sample_prompts)
     with torch.no_grad(), accelerator.autocast():
         for i, prompt_data in enumerate(prompts):
-            prompt = prompt_data.get("prompt")
+            prompt = prompt_data.get("prompt", "")
             negative_prompt = prompt_data.get("negative_prompt", "")
-            seed = prompt_data.get("seed")
-            if seed is None:
-                seed = random.randint(0, 2**32 - 1)
-
+            seed = prompt_data.get("seed", random.randint(0, 2**32 - 1))
+            num_inference_steps = prompt_data.get("steps", 25)
+            guidance_scale = prompt_data.get("guidance_scale", 4.0)
+            height = prompt_data.get("height", 1024)
+            width = prompt_data.get("width", 1024)
             generator = torch.Generator(device=accelerator.device).manual_seed(seed)
 
             logger.info(f"Generating image for prompt: {prompt}")
 
-            num_infer_steps = prompt_data.get("steps", 25)
-            guidance_scale = prompt_data.get("guidance_scale", 4.0)
+            # Prompt Encoding
+            max_len = tokenizer.model_max_length if hasattr(tokenizer, "model_max_length") else 512
+            text_inputs = tokenizer(
+                [prompt], padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
+            )
+            cond_input_ids = text_inputs.input_ids.to(accelerator.device)
+            cond_attention_mask = text_inputs.attention_mask.to(accelerator.device)
+            cond_embeds = text_encoder(cond_input_ids, attention_mask=cond_attention_mask)[0]
 
-            image = pipeline(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                num_inference_steps=num_infer_steps,
-                true_cfg_scale=guidance_scale,
-                generator=generator,
-            ).images[0]
+            uncond_inputs = tokenizer(
+                [negative_prompt], padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
+            )
+            uncond_input_ids = uncond_inputs.input_ids.to(accelerator.device)
+            uncond_attention_mask = uncond_inputs.attention_mask.to(accelerator.device)
+            uncond_embeds = text_encoder(uncond_input_ids, attention_mask=uncond_attention_mask)[0]
 
-            # save image
+            prompt_embeds = torch.cat([uncond_embeds, cond_embeds])
+            prompt_embeds_mask = torch.cat([uncond_attention_mask, cond_attention_mask])
+
+            # Scheduler timesteps
+            scheduler.set_timesteps(num_inference_steps, device=accelerator.device)
+
+            # Latent preparation
+            vae_scale_factor = vae.config.scale_factor if hasattr(vae, "config") and hasattr(vae.config, "scale_factor") else 8
+            latent_height = height // vae_scale_factor
+            latent_width = width // vae_scale_factor
+            num_channels_latents = unet.config.in_channels if hasattr(unet, "config") and hasattr(unet.config, "in_channels") else 32
+            shape = (1, 1, num_channels_latents, latent_height, latent_width)
+            latents = torch.randn(shape, generator=generator, device=accelerator.device, dtype=unet.dtype)
+            latents = latents * scheduler.init_noise_sigma
+
+            # Denoising loop
+            for t in tqdm(scheduler.timesteps):
+                latent_model_input = torch.cat([latents] * 2)
+
+                # The Qwen transformer expects packed latents.
+                packed_latents = _pack_latents(
+                    latent_model_input, 2, num_channels_latents, latent_height, latent_width
+                )
+
+                img_shapes = [[(1, latent_height // 2, latent_width // 2)]] * 2
+                txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+
+                model_pred_packed = unet(
+                    hidden_states=packed_latents,
+                    timestep=t.float(),
+                    guidance=None,
+                    encoder_hidden_states_mask=prompt_embeds_mask,
+                    encoder_hidden_states=prompt_embeds,
+                    img_shapes=img_shapes,
+                    txt_seq_lens=txt_seq_lens,
+                    return_dict=False,
+                )[0]
+
+                pred_uncond, pred_cond = model_pred_packed.chunk(2)
+                model_pred_packed = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+
+                # Unpack for scheduler step
+                model_pred = _unpack_latents(
+                    model_pred_packed, 1, latent_height, latent_width, num_channels_latents
+                )
+
+                latents = scheduler.step(model_pred, t, latents).prev_sample
+
+            # VAE Decoding
+            vae.to(accelerator.device)
+            # VAE for Qwen expects 5D latents, but we should decode slice by slice to be safe.
+            # However, the diffusers implementation seems to handle the 5D tensor directly.
+            latents = latents / vae.config.scaling_factor
+            image_5d = vae.decode(latents).sample
+            image = image_5d.squeeze(2)
+            vae.to("cpu")
+
+            # Post-processing
+            image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
+            image = image.cpu().permute(1, 2, 0).numpy()
+            image = (image * 255).round().astype("uint8")
+            pil_image = Image.fromarray(image)
+
+            # Save image
             output_dir = os.path.join(args.output_dir, "sample")
             os.makedirs(output_dir, exist_ok=True)
-
             num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
             filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{seed}.png"
-            image.save(os.path.join(output_dir, filename))
+            pil_image.save(os.path.join(output_dir, filename))
 
-    pipeline.to("cpu")
-    # Explicitly delete pipeline and copies to free any references promptly
-    del pipeline
-    del unet_for_sampling
-    if 'text_encoder_for_sampling' in locals() and text_encoder_for_sampling is not None:
-        del text_encoder_for_sampling
+    # Restore model states
+    if was_training_unet:
+        unet.train()
+    if was_training_encoder:
+        text_encoder.train()
 
-    # Original models are untouched, no need to restore state or clear cache.
-
+    # Final cleanup
     train_util.clean_memory_on_device(accelerator.device)
