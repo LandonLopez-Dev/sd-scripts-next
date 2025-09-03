@@ -286,7 +286,7 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
             prompt_embeds_mask = torch.cat([uncond_attention_mask, cond_attention_mask])
 
             # Scheduler timesteps
-            scheduler.set_timesteps(num_inference_steps, device=accelerator.device)
+            scheduler.set_timesteps(num_inference_steps, device=accelerator.device, mu=math.log(3))
 
             # Latent preparation
             vae_scale_factor = vae.config.scale_factor if hasattr(vae, "config") and hasattr(vae.config, "scale_factor") else 8
