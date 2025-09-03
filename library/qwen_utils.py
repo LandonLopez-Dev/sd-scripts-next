@@ -194,120 +194,172 @@ def quantize_qwen_transformer_on_demand(transformer, device, dtype):
     return transformer
 
 
-class LoRAModule(torch.nn.Module):
-    """
-    replaces forward method of the original Linear, instead of replacing the original Linear module.
-    """
+def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, tokenizer):
+    # Align sampling cadence with SD3/FLUX
+    if not args.sample_prompts:
+        return
 
-    def __init__(
-        self,
-        lora_name,
-        org_module: torch.nn.Module,
-        multiplier=1.0,
-        lora_dim=4,
-        alpha=1,
-        dropout=None,
-        rank_dropout=None,
-        module_dropout=None,
-    ):
-        """if alpha == 0 or None, alpha is rank (no scaling)."""
-        super().__init__()
-        self.lora_name = lora_name
-        self.org_module = [org_module]
-
-        if self.org_module[0].__class__.__name__ == "Conv2d":
-            in_dim = self.org_module[0].in_channels
-            out_dim = self.org_module[0].out_channels
+    steps = global_step
+    if steps == 0:
+        if not getattr(args, "sample_at_first", False):
+            return
+    else:
+        if getattr(args, "sample_every_n_steps", None) is None and getattr(args, "sample_every_n_epochs", None) is None:
+            return
+        if getattr(args, "sample_every_n_epochs", None) is not None:
+            # ignore sample_every_n_steps when epoch-based sampling is configured
+            if epoch is None or epoch % args.sample_every_n_epochs != 0:
+                return
         else:
-            in_dim = self.org_module[0].in_features
-            out_dim = self.org_module[0].out_features
+            # Only sample during training steps (not end-of-epoch) and at the configured interval
+            if steps % args.sample_every_n_steps != 0 or epoch is not None:
+                return
 
-        # if limit_rank:
-        #   self.lora_dim = min(lora_dim, in_dim, out_dim)
-        #   if self.lora_dim != lora_dim:
-        #     logger.info(f"{lora_name} dim (rank) is changed to: {self.lora_dim}")
-        # else:
-        self.lora_dim = lora_dim
+    logger.info("")
+    logger.info(f"generating sample images at step {global_step} (manual loop)")
 
-        if self.org_module[0].__class__.__name__ == "Conv2d":
-            kernel_size = self.org_module[0].kernel_size
-            stride = self.org_module[0].stride
-            padding = self.org_module[0].padding
-            self.lora_down = torch.nn.Conv2d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
-            self.lora_up = torch.nn.Conv2d(self.lora_dim, out_dim, (1, 1), (1, 1), bias=False)
-        else:
-            self.lora_down = torch.nn.Linear(in_dim, self.lora_dim, bias=False)
-            self.lora_up = torch.nn.Linear(self.lora_dim, out_dim, bias=False)
+    # Unwrap models
+    try:
+        unet = accelerator.unwrap_model(unet)
+        vae = accelerator.unwrap_model(vae)
+        if text_encoder is not None:
+            text_encoder = accelerator.unwrap_model(text_encoder)
+    except Exception:
+        pass
 
-        if type(alpha) == torch.Tensor:
-            alpha = alpha.detach().float().numpy()  # without casting, bf16 causes error
-        alpha = self.lora_dim if alpha is None or alpha == 0 else alpha
-        self.scale = alpha / self.lora_dim
-        self.register_buffer("alpha", torch.tensor(alpha))  # 定数として扱える
+    # Normalize modules in case lists/tuples were passed from callers
+    if isinstance(text_encoder, (list, tuple)):
+        text_encoder = text_encoder[0] if len(text_encoder) > 0 else None
+    if isinstance(unet, (list, tuple)):
+        unet = unet[0] if len(unet) > 0 else None
+    if isinstance(tokenizer, (list, tuple)):
+        tokenizer = tokenizer[0] if len(tokenizer) > 0 else None
+    if unet is None or tokenizer is None or text_encoder is None or vae is None:
+        logger.error("unet, tokenizer, text_encoder, or vae is None, cannot generate sample images.")
+        return
 
-        # same as microsoft's
-        torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
-        torch.nn.init.zeros_(self.lora_up.weight)
+    # Model state management
+    was_training_unet = unet.training
+    was_training_encoder = text_encoder.training
+    unet.eval()
+    text_encoder.eval()
+    vae.eval()
 
-        self.multiplier = multiplier
-        self.dropout = dropout
-        self.rank_dropout = rank_dropout
-        self.module_dropout = module_dropout
+    # Move models to GPU for sampling
+    unet.to(accelerator.device)
+    text_encoder.to(accelerator.device)
 
-    def apply_to(self):
-        self.org_forward = self.org_module[0].forward
-        self.org_module[0].forward = self.forward
-        # Keep reference to org_module for device/dtype alignment in forward
+    # Scheduler setup
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
-    def forward(self, x):
-        # Ensure input and LoRA weights are on the same device/dtype as the original (wrapped) module
-        # Determine the base module's device and dtype from its weight
-        base_weight = getattr(self.org_module[0], 'weight', None)
-        if base_weight is not None:
-            target_device = base_weight.device
-            target_dtype = base_weight.dtype
-        else:
-            # Fallback: use input's current device/dtype
-            target_device = x.device
-            target_dtype = x.dtype
+    prompts = train_util.load_prompts(args.sample_prompts)
+    with torch.no_grad(), accelerator.autocast():
+        for i, prompt_data in enumerate(prompts):
+            prompt = prompt_data.get("prompt", "")
+            negative_prompt = prompt_data.get("negative_prompt", "")
+            seed = prompt_data.get("seed", random.randint(0, 2**32 - 1))
+            num_inference_steps = prompt_data.get("steps", 25)
+            guidance_scale = prompt_data.get("guidance_scale", 4.0)
+            height = prompt_data.get("height", 1024)
+            width = prompt_data.get("width", 1024)
+            generator = torch.Generator(device=accelerator.device).manual_seed(seed)
 
-        # Move input to base module's device/dtype
-        if x.device != target_device or x.dtype != target_dtype:
-            x = x.to(target_device, dtype=target_dtype)
+            logger.info(f"Generating image for prompt: {prompt}")
 
-        # Move LoRA layers to match the base module's device/dtype when needed
-        if self.lora_down.weight.device != target_device or self.lora_down.weight.dtype != target_dtype:
-            self.lora_down.to(target_device, dtype=target_dtype)
-            self.lora_up.to(target_device, dtype=target_dtype)
+            # Prompt Encoding
+            max_len = tokenizer.model_max_length if hasattr(tokenizer, "model_max_length") else 512
+            text_inputs = tokenizer(
+                [prompt], padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
+            )
+            cond_input_ids = text_inputs.input_ids.to(accelerator.device)
+            cond_attention_mask = text_inputs.attention_mask.to(accelerator.device)
+            cond_embeds = text_encoder(cond_input_ids, attention_mask=cond_attention_mask)[0]
 
-        org_forwarded = self.org_forward(x)
+            uncond_inputs = tokenizer(
+                [negative_prompt], padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
+            )
+            uncond_input_ids = uncond_inputs.input_ids.to(accelerator.device)
+            uncond_attention_mask = uncond_inputs.attention_mask.to(accelerator.device)
+            uncond_embeds = text_encoder(uncond_input_ids, attention_mask=uncond_attention_mask)[0]
 
-        # module dropout
-        if self.module_dropout is not None and self.training:
-            if torch.rand(1) < self.module_dropout:
-                return org_forwarded
+            prompt_embeds = torch.cat([uncond_embeds, cond_embeds])
+            prompt_embeds_mask = torch.cat([uncond_attention_mask, cond_attention_mask])
 
-        lx = self.lora_down(x)
+            # Scheduler timesteps
+            scheduler.set_timesteps(num_inference_steps, device=accelerator.device)
 
-        # normal dropout
-        if self.dropout is not None and self.training:
-            lx = torch.nn.functional.dropout(lx, p=self.dropout)
+            # Latent preparation
+            vae_scale_factor = vae.config.scale_factor if hasattr(vae, "config") and hasattr(vae.config, "scale_factor") else 8
+            latent_height = height // vae_scale_factor
+            latent_width = width // vae_scale_factor
+            num_channels_latents = unet.config.in_channels if hasattr(unet, "config") and hasattr(unet.config, "in_channels") else 32
+            shape = (1, 1, num_channels_latents, latent_height, latent_width)
+            latents = torch.randn(shape, generator=generator, device=accelerator.device, dtype=unet.dtype)
 
-        # rank dropout
-        if self.rank_dropout is not None and self.training:
-            mask = torch.rand((lx.size(0), self.lora_dim), device=lx.device) > self.rank_dropout
-            if len(lx.size()) == 3:
-                mask = mask.unsqueeze(1)  # for Text Encoder
-            elif len(lx.size()) == 4:
-                mask = mask.unsqueeze(-1).unsqueeze(-1)  # for Conv2d
-            lx = lx * mask
+            if hasattr(scheduler, "init_noise_sigma"):
+                latents = latents * scheduler.init_noise_sigma
 
-            # scaling for rank dropout: treat as if the rank is changed
-            # maskから計算することも考えられるが、augmentation的な効果を期待してrank_dropoutを用いる
-            scale = self.scale * (1.0 / (1.0 - self.rank_dropout))  # redundant for readability
-        else:
-            scale = self.scale
+            # Denoising loop
+            for t in tqdm(scheduler.timesteps):
+                latent_model_input = torch.cat([latents] * 2)
 
-        lx = self.lora_up(lx)
+                packed_latents = _pack_latents(
+                    latent_model_input, 2, num_channels_latents, latent_height, latent_width
+                )
 
-        return org_forwarded + lx * self.multiplier * scale
+                img_shapes = [[(1, latent_height // 2, latent_width // 2)]] * 2
+                txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist()
+
+                model_pred_packed = unet(
+                    hidden_states=packed_latents,
+                    timestep=t.float(),
+                    guidance=None,
+                    encoder_hidden_states_mask=prompt_embeds_mask,
+                    encoder_hidden_states=prompt_embeds,
+                    img_shapes=img_shapes,
+                    txt_seq_lens=txt_seq_lens,
+                    return_dict=False,
+                )[0]
+
+                pred_uncond, pred_cond = model_pred_packed.chunk(2)
+                model_pred_packed = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+
+                model_pred = _unpack_latents(
+                    model_pred_packed, 1, latent_height, latent_width, num_channels_latents
+                )
+
+                latents = scheduler.step(model_pred, t, latents).prev_sample
+
+            # VAE Decoding
+            vae.to(accelerator.device)
+            if hasattr(vae.config, "scaling_factor"):
+                latents = latents / vae.config.scaling_factor
+            image_5d = vae.decode(latents).sample
+            image = image_5d.squeeze(2)
+            vae.to("cpu")
+
+            # Post-processing
+            image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
+            image = image.cpu().permute(1, 2, 0).numpy()
+            image = (image * 255).round().astype("uint8")
+            pil_image = Image.fromarray(image)
+
+            # Save image
+            output_dir = os.path.join(args.output_dir, "sample")
+            os.makedirs(output_dir, exist_ok=True)
+            num_suffix = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
+            filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{seed}.png"
+            pil_image.save(os.path.join(output_dir, filename))
+
+    # Restore model states
+    if was_training_unet:
+        unet.train()
+    if was_training_encoder:
+        text_encoder.train()
+
+    # Move models back to CPU
+    unet.to("cpu")
+    text_encoder.to("cpu")
+
+    # Final cleanup
+    train_util.clean_memory_on_device(accelerator.device)
