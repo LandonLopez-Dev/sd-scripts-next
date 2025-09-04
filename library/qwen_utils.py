@@ -239,6 +239,17 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
         return
 
     # Model state management
+    # disable gradient checkpointing for sampling
+    ckpt_prev_state = None
+    try:
+        if hasattr(unet, "gradient_checkpointing_disable"):
+            unet.gradient_checkpointing_disable()
+            ckpt_prev_state = True
+        elif hasattr(unet, "gradient_checkpointing"):
+            ckpt_prev_state = unet.gradient_checkpointing
+            unet.gradient_checkpointing = False
+    except Exception:
+        pass
 
     # Move models to GPU for sampling
     unet.to(accelerator.device)
@@ -378,6 +389,16 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
                             setattr(blk, attr_name, None)
                         except Exception:
                             pass
+    except Exception:
+        pass
+
+    # Restore gradient checkpointing state
+    try:
+        if ckpt_prev_state is not None:
+            if hasattr(unet, "gradient_checkpointing_enable") and ckpt_prev_state:
+                unet.gradient_checkpointing_enable()
+            elif hasattr(unet, "gradient_checkpointing"):
+                unet.gradient_checkpointing = ckpt_prev_state
     except Exception:
         pass
 
