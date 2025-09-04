@@ -168,18 +168,12 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         qwen_utils.sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, tokenizers[0])
 
     def prepare_unet_with_accelerator(self, args, accelerator: Accelerator, unet: torch.nn.Module) -> torch.nn.Module:
-        # Override the base class implementation.
-        # The default logic in train_network.py enables gradient checkpointing *before* accelerator.prepare,
-        # which can break the functionality. Here, we prepare the unet first, then enable checkpointing.
-
-        logger.info("Preparing unet with accelerator")
-        prepared_unet = accelerator.prepare(unet)
-
+        # do not prepare unet with accelerator, but enable gradient checkpointing if needed
+        # and leave it on CPU. It will be moved to GPU in each step.
         if args.gradient_checkpointing:
             logger.info("Enabling gradient checkpointing for Qwen unet")
-            prepared_unet.enable_gradient_checkpointing()
-
-        return prepared_unet
+            unet.enable_gradient_checkpointing()
+        return unet
 
     def get_noise_pred_and_target(
         self,
@@ -293,154 +287,20 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         timesteps = timesteps.to(device=pe_device)
         t = t.to(device=pe_device, dtype=pe_dtype)
 
-        # Run Qwen forward under Accelerate's autocast so it respects --mixed_precision
-        # Perform deferred safe move of the transformer to CUDA just before first use
-        if getattr(args, "use_qfloat8_on_demand", False) and hasattr(unet, "_defer_move_device"):
-            logger.debug(
-                f"Qwen forward start: device={pe_device}, dtype={pe_dtype}, latents={tuple(packed_noisy_model_input.shape)}, txt={tuple(prompt_embeds.shape)}")
-            try:
-                dev = getattr(unet, "_defer_move_device")
-                dt = getattr(unet, "_defer_move_dtype", None)
-                logger.debug(f"Deferred move: moving quantized Qwen transformer to {dev} now.")
-                unet.to(dev, dtype=dt)
-                delattr(unet, "_defer_move_device")
-                if hasattr(unet, "_defer_move_dtype"):
-                    delattr(unet, "_defer_move_dtype")
-                if dev.type == "cuda":
-                    torch.cuda.synchronize(dev)
-                logger.debug("Deferred move completed.")
-            except Exception as e:
-                logger.warning(f"Deferred move failed (will proceed anyway): {e}")
-        # After deferred move, re-align inputs to the UNet's new device/dtype before forward
-        try:
-            new_device = next(unet.parameters()).device
-        except StopIteration:
-            new_device = getattr(unet, "device", pe_device)
-        try:
-            new_dtype = next(unet.parameters()).dtype
-        except StopIteration:
-            new_dtype = pe_dtype
-        # Only cast floating tensors; keep masks as bool
-        if packed_noisy_model_input.device != new_device or packed_noisy_model_input.dtype != new_dtype:
-            packed_noisy_model_input = packed_noisy_model_input.to(device=new_device, dtype=new_dtype, non_blocking=True)
-        if prompt_embeds.device != new_device or prompt_embeds.dtype != new_dtype:
-            prompt_embeds = prompt_embeds.to(device=new_device, dtype=new_dtype, non_blocking=True)
-        if prompt_embeds_mask.device != new_device:
-            prompt_embeds_mask = prompt_embeds_mask.to(device=new_device, non_blocking=True)
-        if timesteps.device != new_device:
-            timesteps = timesteps.to(device=new_device, non_blocking=True)
-        if t.device != new_device or t.dtype != new_dtype:
-            t = t.to(device=new_device, dtype=new_dtype, non_blocking=True)
-        logger.debug(f"Realigned inputs to device={new_device}, dtype={new_dtype} after deferred move.")
+        # manually move unet to device and cast to weight_dtype
+        unet.to(accelerator.device, dtype=weight_dtype)
 
-        # One-time safe warmup to initialize CUDA kernels for qfloat8 on Windows before the real forward
-        if getattr(args, "use_qfloat8_on_demand", False) and new_device.type == "cuda" and not hasattr(unet, "_did_safe_warmup"):
-            old_benchmark = None
-            old_tf32 = None
-            try:
-                # Make kernel selection deterministic and simple for the first call
-                old_benchmark = torch.backends.cudnn.benchmark
-                torch.backends.cudnn.benchmark = False
-                if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
-                    old_tf32 = torch.backends.cuda.matmul.allow_tf32
-                    torch.backends.cuda.matmul.allow_tf32 = False
-            except Exception:
-                pass
-            try:
-                logger.debug("CUDA preflight sync A (before warmup)...")
-                # Ensure all pending async copies complete before warmup
-                torch.cuda.synchronize(new_device)
-                # Perform a tiny CUDA matmul to initialize cuBLAS handles outside the model
-                try:
-                    a = torch.zeros((1, 1), device=new_device, dtype=torch.float32)
-                    b = torch.zeros((1, 1), device=new_device, dtype=torch.float32)
-                    _ = a @ b
-                    torch.cuda.synchronize(new_device)
-                    logger.debug("cuBLAS tiny matmul warmup completed.")
-                except Exception as _e:
-                    logger.warning(f"cuBLAS tiny matmul warmup failed (non-fatal): {_e}")
-                logger.debug("Skipping Qwen safe warmup on Windows; proceeding to real forward.")
-                setattr(unet, "_did_safe_warmup", True)
-            except Exception as e:
-                logger.warning(f"Qwen safe warmup forward failed (non-fatal): {e}")
-            finally:
-                try:
-                    if old_benchmark is not None:
-                        torch.backends.cudnn.benchmark = old_benchmark
-                    if old_tf32 is not None:
-                        torch.backends.cuda.matmul.allow_tf32 = old_tf32
-                except Exception:
-                    pass
-
-        # Ensure device is synchronized right before actual forward to avoid stream hazards on first call
-        if getattr(args, "use_qfloat8_on_demand", False) and new_device.type == "cuda":
-            try:
-                logger.debug("CUDA preflight sync C (before real forward)...")
-                torch.cuda.synchronize(new_device)
-            except Exception:
-                pass
-        if getattr(args, "use_qfloat8_on_demand", False) and new_device.type == "cuda" and not hasattr(unet, "_did_first_forward"):
-            try:
-                logger.debug("Qwen first real forward (autocast+no_grad, eval-mode) start...")
-                was_training = getattr(unet, "training", False)
-                try:
-                    unet.eval()
-                except Exception:
-                    pass
-                # Ensure inputs are contiguous to avoid any fragmented views on first call
-                packed_noisy_model_input = packed_noisy_model_input.contiguous()
-                prompt_embeds = prompt_embeds.contiguous()
-                # Prefer a safe CUDA forward with autocast and no_grad on Windows for qfloat8
-                with torch.no_grad():
-                    with accelerator.autocast():
-                        model_pred_packed = unet(
-                            hidden_states=packed_noisy_model_input,
-                            timestep=t.float(),
-                            guidance=None,
-                            encoder_hidden_states_mask=prompt_embeds_mask,
-                            encoder_hidden_states=prompt_embeds,
-                            img_shapes=img_shapes,
-                            txt_seq_lens=txt_seq_lens,
-                            return_dict=False,
-                        )[0]
-                try:
-                    if was_training:
-                        unet.train()
-                except Exception:
-                    pass
-                setattr(unet, "_did_first_forward", True)
-                logger.debug("Qwen first real forward (autocast+no_grad) completed.")
-            except Exception as e:
-                logger.warning(f"Qwen first real forward (autocast+no_grad) failed (non-fatal): {e}; attempting fp32 no-autocast path.")
-                with torch.no_grad():
-                    model_pred_packed = unet(
-                        hidden_states=packed_noisy_model_input,
-                        timestep=t.float(),
-                        guidance=None,
-                        encoder_hidden_states_mask=prompt_embeds_mask,
-                        encoder_hidden_states=prompt_embeds,
-                        img_shapes=img_shapes,
-                        txt_seq_lens=txt_seq_lens,
-                        return_dict=False,
-                    )[0]
-        else:
-            with accelerator.autocast():
-                # Ensure contiguity before forward to avoid unexpected view semantics
-                if not packed_noisy_model_input.is_contiguous():
-                    packed_noisy_model_input = packed_noisy_model_input.contiguous()
-                if not prompt_embeds.is_contiguous():
-                    prompt_embeds = prompt_embeds.contiguous()
-                model_pred_packed = unet(
-                    hidden_states=packed_noisy_model_input,
-                    timestep=t.float(),
-                    guidance=None,
-                    encoder_hidden_states_mask=prompt_embeds_mask,
-                    encoder_hidden_states=prompt_embeds,
-                    img_shapes=img_shapes,
-                    txt_seq_lens=txt_seq_lens,
-                    return_dict=False,
-                )[0]
-        logger.debug("Qwen forward end")
+        with accelerator.autocast():
+            model_pred_packed = unet(
+                hidden_states=packed_noisy_model_input,
+                timestep=t.float(),
+                guidance=None,
+                encoder_hidden_states_mask=prompt_embeds_mask,
+                encoder_hidden_states=prompt_embeds,
+                img_shapes=img_shapes,
+                txt_seq_lens=txt_seq_lens,
+                return_dict=False,
+            )[0]
 
         model_pred_5d = QwenImagePipeline._unpack_latents(
             model_pred_packed,
@@ -486,6 +346,10 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
             clean_memory_on_device(accelerator.device)
         except Exception:
             pass
+
+        # move unet back to cpu
+        unet.to("cpu")
+        clean_memory_on_device(accelerator.device)
 
         return model_pred, target, timesteps, None
 
