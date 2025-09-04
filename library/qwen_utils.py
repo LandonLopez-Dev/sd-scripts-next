@@ -384,7 +384,6 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
     # Restore model states
 
     # Move models back to CPU
-    unet.to("cpu")
     text_encoder.to("cpu")
 
     # Final cleanup
