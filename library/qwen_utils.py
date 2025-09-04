@@ -79,27 +79,18 @@ def load_qwen_transformer(
     # For on-demand qfloat8 on Windows we will keep the transformer on CPU until after quantization.
     transformer.to(device)
 
-    # Enable gradient checkpointing for Qwen transformer when requested or when using grad accumulation
-    try:
-        enable_ckpt = False
-        if accelerator is not None and getattr(accelerator, "gradient_accumulation_steps", 1) > 1:
-            enable_ckpt = True
-        if args is not None and getattr(args, "gradient_checkpointing", False):
-            enable_ckpt = True
-        if enable_ckpt:
-            # Match HF convention if available
-            if hasattr(transformer, "enable_input_require_grads"):
-                transformer.enable_input_require_grads()
-            # diffusers models often expose gradient_checkpointing_enable
-            if hasattr(transformer, "gradient_checkpointing_enable"):
-                transformer.gradient_checkpointing_enable()
-            else:
-                # Fallback: set a common flag if present
-                if hasattr(transformer, "gradient_checkpointing"):
-                    transformer.gradient_checkpointing = True
-            logger.info("Enabled gradient checkpointing for Qwen transformer")
-    except Exception as e:
-        logger.warning(f"Failed to enable gradient checkpointing for Qwen transformer: {e}")
+    # Enable gradient checkpointing for Qwen transformer when requested
+    # We explicitly target the `transformer_blocks` module, as this was identified as the robust
+    # solution from analyzing other working training implementations.
+    if args is not None and getattr(args, "gradient_checkpointing", False):
+        if hasattr(transformer, "transformer_blocks") and isinstance(transformer.transformer_blocks, torch.nn.ModuleList):
+            logger.info("Enabling gradient checkpointing on Qwen transformer_blocks")
+            # This is the more robust way to enable it for this architecture
+            transformer.transformer_blocks.gradient_checkpointing_enable()
+        else:
+            # Fallback for older diffusers versions or different model structures
+            logger.info("Enabling gradient checkpointing on Qwen transformer (fallback)")
+            transformer.enable_gradient_checkpointing()
 
     if args is not None and getattr(args, "use_qfloat8_on_demand", False):
         logger.info("Quantizing Qwen transformer on demand to qfloat8")
