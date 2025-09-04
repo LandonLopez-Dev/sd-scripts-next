@@ -292,7 +292,7 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
             vae_scale_factor = vae.config.scale_factor if hasattr(vae, "config") and hasattr(vae.config, "scale_factor") else 8
             latent_height = height // vae_scale_factor
             latent_width = width // vae_scale_factor
-            num_channels_latents = unet.config.in_channels if hasattr(unet, "config") and hasattr(unet.config, "in_channels") else 32
+            num_channels_latents = vae.config.latent_channels
             shape = (1, 1, num_channels_latents, latent_height, latent_width)
             latents = torch.randn(shape, generator=generator, device=accelerator.device, dtype=unet.dtype)
 
