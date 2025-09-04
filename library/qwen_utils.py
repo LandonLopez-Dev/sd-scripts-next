@@ -346,6 +346,25 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
             filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{seed}.png"
             pil_image.save(os.path.join(output_dir, filename))
 
+    # Attempt to clear any internal caches/state in the Qwen transformer to avoid shape drift after sampling
+    try:
+        # Common patterns across diffusers models
+        if hasattr(unet, "clear_kv_cache") and callable(getattr(unet, "clear_kv_cache")):
+            unet.clear_kv_cache()
+        if hasattr(unet, "_clear_cache") and callable(getattr(unet, "_clear_cache")):
+            unet._clear_cache()
+        # Some implementations keep attention caches or rotary caches per-block
+        if hasattr(unet, "transformer_blocks"):
+            for blk in unet.transformer_blocks:
+                for attr_name in ("kv_cache", "_kv_cache", "attn_cache", "cache", "_attn_bias", "attn_bias"):
+                    if hasattr(blk, attr_name):
+                        try:
+                            setattr(blk, attr_name, None)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
     # Restore model states
 
     # Move models back to CPU
