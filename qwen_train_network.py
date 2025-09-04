@@ -168,14 +168,18 @@ class QwenNetworkTrainer(train_network.NetworkTrainer):
         qwen_utils.sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet, tokenizers[0])
 
     def prepare_unet_with_accelerator(self, args, accelerator: Accelerator, unet: torch.nn.Module) -> torch.nn.Module:
-        # Avoid wrapping the Qwen transformer with Accelerator when using on-demand qfloat8 quantization.
-        # Some accelerator backends attempt to cast/replicate parameters which can hang with Quanto qfloat8 tensors on Windows.
-        if getattr(args, "use_qfloat8_on_demand", False):
-            # Just move to the correct device; dtype is already handled by caller.
-            logger.info("Skipping accelerator.prepare(unet) due to --use_qfloat8_on_demand; moving model to device directly.")
-            # Do not move now; if quantized with deferral, we'll move at first forward safely.
-            return unet
-        return super().prepare_unet_with_accelerator(args, accelerator, unet)
+        # Override the base class implementation.
+        # The default logic in train_network.py enables gradient checkpointing *before* accelerator.prepare,
+        # which can break the functionality. Here, we prepare the unet first, then enable checkpointing.
+
+        logger.info("Preparing unet with accelerator")
+        prepared_unet = accelerator.prepare(unet)
+
+        if args.gradient_checkpointing:
+            logger.info("Enabling gradient checkpointing for Qwen unet")
+            prepared_unet.enable_gradient_checkpointing()
+
+        return prepared_unet
 
     def get_noise_pred_and_target(
         self,
