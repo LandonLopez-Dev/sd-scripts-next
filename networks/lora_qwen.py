@@ -46,17 +46,50 @@ class QwenLoRANetwork(LoRANetwork):
         # create module instances
         def create_modules(prefix, root_module: torch.nn.Module) -> List[LoRAModule]:
             loras = []
+            # Based on the model structure of QwenImageTransformer2DModel and successful training scripts
+            # from other repositories, we target a comprehensive set of layers.
+            # This includes all major linear projections in the attention blocks and the MLP blocks.
+            target_suffixes = [
+                # Attention projections
+                ".attn.to_q",
+                ".attn.to_k",
+                ".attn.to_v",
+                ".attn.to_out.0",
+                # Cross-attention projections for text
+                ".attn.add_q_proj",
+                ".attn.add_k_proj",
+                ".attn.add_v_proj",
+                ".attn.to_add_out",
+                # MLP layers for image stream
+                ".img_mlp.net.0",
+                ".img_mlp.net.2",
+                # MLP layers for text stream
+                ".txt_mlp.net.0",
+                ".txt_mlp.net.2",
+                # Modulation layers
+                ".img_mod.1",
+                ".txt_mod.1",
+                # Top-level input and output projections
+                "img_in",
+                "txt_in",
+                "proj_out",
+            ]
             for name, module in root_module.named_modules():
                 if isinstance(module, torch.nn.Linear):
-                    # Broaden matcher to catch Qwen projection names
-                    # Limit default targets to attention projections only to keep LoRA size reasonable
-                    # Include common naming variants for Qwen attention layers
-                    if any(t in name for t in ["to_q", "to_k", "to_v", "to_out.0", "q_proj", "k_proj", "v_proj", "o_proj"]):
-                        lora_name = prefix + '_' + name.replace('.', '_')
-                        loras.append(LoRAModule(
-                            lora_name, module, self.multiplier, self.lora_dim, self.alpha,
-                            self.dropout, self.rank_dropout, self.module_dropout
-                        ))
+                    if any(name.endswith(suffix) for suffix in target_suffixes):
+                        lora_name = prefix + "_" + name.replace(".", "_")
+                        loras.append(
+                            LoRAModule(
+                                lora_name,
+                                module,
+                                self.multiplier,
+                                self.lora_dim,
+                                self.alpha,
+                                self.dropout,
+                                self.rank_dropout,
+                                self.module_dropout,
+                            )
+                        )
             return loras
 
         text_encoders = text_encoder if isinstance(text_encoder, list) else [text_encoder]
