@@ -239,11 +239,6 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
         return
 
     # Model state management
-    was_training_unet = unet.training
-    was_training_encoder = text_encoder.training
-    unet.eval()
-    text_encoder.eval()
-    vae.eval()
 
     # Move models to GPU for sampling
     unet.to(accelerator.device)
@@ -352,10 +347,6 @@ def sample_images(accelerator, args, epoch, global_step, text_encoder, vae, unet
             pil_image.save(os.path.join(output_dir, filename))
 
     # Restore model states
-    if was_training_unet:
-        unet.train()
-    if was_training_encoder:
-        text_encoder.train()
 
     # Move models back to CPU
     unet.to("cpu")
