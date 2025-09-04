@@ -49,7 +49,9 @@ class QwenLoRANetwork(LoRANetwork):
             for name, module in root_module.named_modules():
                 if isinstance(module, torch.nn.Linear):
                     # Broaden matcher to catch Qwen projection names
-                    if any(t in name for t in ["to_q", "to_k", "to_v", "to_out.0", "q_proj", "k_proj", "v_proj", "o_proj", "proj", "fc1", "fc2"]):
+                    # Limit default targets to attention projections only to keep LoRA size reasonable
+                    # Include common naming variants for Qwen attention layers
+                    if any(t in name for t in ["to_q", "to_k", "to_v", "to_out.0", "q_proj", "k_proj", "v_proj", "o_proj"]):
                         lora_name = prefix + '_' + name.replace('.', '_')
                         loras.append(LoRAModule(
                             lora_name, module, self.multiplier, self.lora_dim, self.alpha,
