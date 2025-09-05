@@ -28,10 +28,12 @@ from diffusers.training_utils import (
 )
 from diffusers.utils import convert_state_dict_to_diffusers
 from diffusers.utils.torch_utils import is_compiled_module
-from finetune.lora_dataset import setup_dataloader
+import library.config_util as config_util
+from torch.utils.data import DataLoader
 from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 import transformers
+import library.strategy_base as strategy_base
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -40,16 +42,19 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument("--dataset_config", type=str, default=None, help="path to dataset config file")
     parser.add_argument("--output_dir", type=str, default="output")
+    parser.add_argument(
+        "--output_name", type=str, default=None, help="base name of trained model file / 学習後のモデルの拡張子を除くファイル名"
+    )
     parser.add_argument("--logging_dir", type=str, default="logs")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--mixed_precision", type=str, default="no", choices=["no", "fp16", "bf16"])
-    parser.add_argument("--report_to", type=str, default="tensorboard")
+    parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
+    parser.add_argument("--log_with", type=str, default="tensorboard")
     parser.add_argument("--pretrained_model_name_or_path", type=str, required=True)
-    parser.add_argument("--rank", type=int, default=4)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--network_dim", type=int, default=16)
+    parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--adam_beta1", type=float, default=0.9)
     parser.add_argument("--adam_beta2", type=float, default=0.999)
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-2)
+    parser.add_argument("--adam_weight_decay", type=float, default=0.01)
     parser.add_argument("--adam_epsilon", type=float, default=1e-8)
     parser.add_argument("--lr_scheduler", type=str, default="constant")
     parser.add_argument("--lr_warmup_steps", type=int, default=0)
@@ -57,7 +62,7 @@ def parse_args():
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument("--tracker_project_name", type=str, default="qwen-lora")
     parser.add_argument("--train_batch_size", type=int, default=1)
-    parser.add_argument("--checkpointing_steps", type=int, default=1000)
+    parser.add_argument("--save_every_n_steps", type=int, default=300)
     parser.add_argument("--checkpoints_total_limit", type=int, default=None)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--enable_bucket", action="store_true")
@@ -68,6 +73,27 @@ def parse_args():
     parser.add_argument("--debug_dataset", action="store_true")
     parser.add_argument("--max_data_loader_n_workers", type=int, default=0)
     parser.add_argument("--resolution", type=str, default="512,512")
+    parser.add_argument(
+        "--sample_at_first", action="store_true", help="generate sample images before training / 学習前にサンプル出力する"
+    )
+    parser.add_argument(
+        "--sample_every_n_steps",
+        type=int,
+        default=None,
+        help="generate sample images every N steps / 学習中のモデルで指定ステップごとにサンプル出力する",
+    )
+    parser.add_argument(
+        "--sample_every_n_epochs",
+        type=int,
+        default=None,
+        help="generate sample images every N epochs (overwrites n_steps) / 学習中のモデルで指定エポックごとにサンプル出力する（ステップ数指定を上書きします）",
+    )
+    parser.add_argument(
+        "--sample_prompts",
+        type=str,
+        default=None,
+        help="file for prompts to generate sample images / 学習中モデルのサンプル出力用プロンプトのファイル",
+    )
 
     args = parser.parse_args()
     if args.resolution:
@@ -79,13 +105,9 @@ def main():
     args = parse_args()
 
     if args.dataset_config:
-        config = toml.load(args.dataset_config)
-        if 'general' in config:
-             for k, v in config['general'].items():
-                 if hasattr(args, k):
-                    setattr(args, k, v)
+        user_config = config_util.load_user_config(args.dataset_config)
     else:
-        config = {}
+        user_config = {"datasets": []}
 
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
@@ -94,7 +116,7 @@ def main():
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
+        log_with=args.log_with,
         project_config=accelerator_project_config,
     )
 
@@ -140,8 +162,8 @@ def main():
         args.pretrained_model_name_or_path,
         subfolder="transformer", )
     lora_config = LoraConfig(
-        r=args.rank,
-        lora_alpha=args.rank,
+        r=args.network_dim,
+        lora_alpha=args.network_dim,
         init_lora_weights="gaussian",
         target_modules=["to_k", "to_q", "to_v", "to_out.0"],
     )
@@ -189,7 +211,45 @@ def main():
         eps=args.adam_epsilon,
     )
 
-    train_dataloader = setup_dataloader(config, args)
+    # Build dataset from user_config using standard config_util pipeline
+    sanitizer = config_util.ConfigSanitizer(support_dreambooth=True, support_finetuning=True, support_controlnet=False, support_dropout=True)
+    blueprint = config_util.BlueprintGenerator(sanitizer).generate(user_config, args)
+    train_dataset_group, _ = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+
+    # Prevent dataset from trying to tokenize by setting a no-op caching strategy
+    class _NoTextEncoderCache(strategy_base.TextEncoderOutputsCachingStrategy):
+        def __init__(self):
+            super().__init__(cache_to_disk=False, batch_size=None, skip_disk_cache_validity_check=True, is_partial=False)
+        def get_outputs_npz_path(self, image_abs_path: str) -> str: raise NotImplementedError
+        def load_outputs_npz(self, npz_path: str): raise NotImplementedError
+        def is_disk_cached_outputs_expected(self, npz_path: str) -> bool: return False
+        def cache_batch_outputs(self, tokenize_strategy, models, text_encoding_strategy, batch):
+            return None
+
+    # Set strategies so BaseDataset doesn't attempt tokenization/caching
+    strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(_NoTextEncoderCache())
+    # TokenizeStrategy must be set (dataset references it), but Qwen path encodes prompts directly.
+    # Set a dummy strategy that won't be used since tokenization is disabled by the above caching strategy.
+    class _DummyTokenizeStrategy(strategy_base.TokenizeStrategy):
+        def tokenize(self, text):
+            # Return a structure compatible with dataset expectations but unused.
+            # Expecting list of token tensors per text model; return empty to indicate no tokens.
+            return []
+        def tokenize_with_weights(self, text):
+            return [], []
+    strategy_base.TokenizeStrategy.set_strategy(_DummyTokenizeStrategy())
+
+    # Dataset needs to capture current strategies for worker processes
+    train_dataset_group.set_current_strategies()
+
+    train_dataloader = DataLoader(
+        train_dataset_group,
+        batch_size=1,  # batching is handled inside the dataset
+        shuffle=True,
+        collate_fn=lambda examples: examples[0],
+        num_workers=args.max_data_loader_n_workers,
+        pin_memory=True,
+    )
 
     if args.max_train_steps == 0:
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -328,7 +388,7 @@ def main():
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
 
-                if global_step % args.checkpointing_steps == 0:
+                if global_step % args.save_every_n_steps == 0:
                     if accelerator.is_main_process:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
