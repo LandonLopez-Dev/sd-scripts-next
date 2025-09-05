@@ -1,9 +1,11 @@
+import argparse
 import copy
 from copy import deepcopy
 import logging
 import math
 import os
 import shutil
+import random
 
 import torch
 from tqdm.auto import tqdm
@@ -32,23 +34,17 @@ import transformers
 from library import train_util, config_util, deepspeed_utils
 from library.utils import setup_logging, add_logging_arguments
 
+import train_network
+
 
 def setup_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Simple example of a training script.")
+    parser = train_network.setup_parser()
 
-    add_logging_arguments(parser)
-    train_util.add_sd_models_arguments(parser)
-    train_util.add_dataset_arguments(parser, True, True, True)
-    train_util.add_training_arguments(parser, True)
-    train_util.add_optimizer_arguments(parser)
-    config_util.add_config_arguments(parser)
-
-    parser.add_argument(
-        "--network_dim",
-        type=int,
-        default=16,
-        help="network dimensions (depends on each network) / モジュールの次元数（ネットワークにより定義は異なります）",
-    )
+    # train_util.add_sd_models_arguments(parser)
+    # train_util.add_dataset_arguments(parser, True, True, True)
+    # train_util.add_training_arguments(parser, True)
+    # train_util.add_optimizer_arguments(parser)
+    # config_util.add_config_arguments(parser)
 
     return parser
 
