@@ -195,11 +195,10 @@ def main():
     for n, param in transformer.named_parameters():
         if 'lora' not in n:
             param.requires_grad = False
-            pass
         else:
             param.requires_grad = True
-            print(n)
-    print(sum([p.numel() for p in transformer.parameters() if p.requires_grad]) / 1000000, 'parameters')
+            logger.debug(n)
+    logger.info(f"{sum([p.numel() for p in transformer.parameters() if p.requires_grad]) / 1000000:.5f} parameters")
     lora_layers = filter(lambda p: p.requires_grad, transformer.parameters())
 
     transformer.enable_gradient_checkpointing()
