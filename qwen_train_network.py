@@ -1,7 +1,7 @@
-import argparse
 import copy
 from copy import deepcopy
 import logging
+import math
 import os
 import shutil
 
@@ -10,7 +10,7 @@ from tqdm.auto import tqdm
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import ProjectConfiguration
+from accelerate.utils import ProjectConfiguration, set_seed
 import datasets
 import diffusers
 from diffusers import FlowMatchEulerDiscreteScheduler
@@ -19,38 +19,56 @@ from diffusers import (
     QwenImagePipeline,
     QwenImageTransformer2DModel,
 )
-from diffusers.optimization import get_scheduler
 from diffusers.training_utils import (
     compute_density_for_timestep_sampling,
     compute_loss_weighting_for_sd3,
 )
 from diffusers.utils import convert_state_dict_to_diffusers
 from diffusers.utils.torch_utils import is_compiled_module
-from image_datasets.dataset import loader
-from omegaconf import OmegaConf
 from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 import transformers
 
+from library import train_util, config_util, deepspeed_utils
+from library.utils import setup_logging, add_logging_arguments
+
+
+def setup_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Simple example of a training script.")
+
+    add_logging_arguments(parser)
+    train_util.add_sd_models_arguments(parser)
+    train_util.add_dataset_arguments(parser, True, True, True)
+    train_util.add_training_arguments(parser, True)
+    train_util.add_optimizer_arguments(parser)
+    config_util.add_config_arguments(parser)
+
+    parser.add_argument(
+        "--network_dim",
+        type=int,
+        default=16,
+        help="network dimensions (depends on each network) / モジュールの次元数（ネットワークにより定義は異なります）",
+    )
+
+    return parser
+
+
 logger = get_logger(__name__, log_level="INFO")
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Simple example of a training script.")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        required=True,
-        help="path to config",
-    )
-    args = parser.parse_args()
-
-    return args.config
-
-
 def main():
-    args = OmegaConf.load(parse_args())
+    parser = setup_parser()
+    args = parser.parse_args()
+    args = train_util.read_config_from_file(args, parser)
+    train_util.verify_training_args(args)
+    train_util.prepare_dataset_args(args, True)
+    deepspeed_utils.prepare_deepspeed_args(args)
+    setup_logging(args, reset=True)
+
+    if args.seed is None:
+        args.seed = random.randint(0, 2**32)
+    set_seed(args.seed)
+
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -58,7 +76,7 @@ def main():
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
+        log_with=args.log_with,
         project_config=accelerator_project_config,
     )
 
@@ -86,13 +104,9 @@ def main():
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-        args.mixed_precision = accelerator.mixed_precision
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-        args.mixed_precision = accelerator.mixed_precision
+
+    weight_dtype, save_dtype = train_util.prepare_dtype(args)
+
     text_encoding_pipeline = QwenImagePipeline.from_pretrained(
         args.pretrained_model_name_or_path, transformer=None, vae=None, torch_dtype=weight_dtype
     )
@@ -104,8 +118,8 @@ def main():
         args.pretrained_model_name_or_path,
         subfolder="transformer", )
     lora_config = LoraConfig(
-        r=args.rank,
-        lora_alpha=args.rank,
+        r=args.network_dim,
+        lora_alpha=args.network_dim,
         init_lora_weights="gaussian",
         target_modules=["to_k", "to_q", "to_v", "to_out.0"],
     )
@@ -133,7 +147,6 @@ def main():
     transformer.requires_grad_(False)
 
     transformer.train()
-    optimizer_cls = torch.optim.AdamW
     for n, param in transformer.named_parameters():
         if 'lora' not in n:
             param.requires_grad = False
@@ -145,36 +158,72 @@ def main():
     lora_layers = filter(lambda p: p.requires_grad, transformer.parameters())
 
     transformer.enable_gradient_checkpointing()
-    optimizer = optimizer_cls(
-        lora_layers,
-        lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
-        weight_decay=args.adam_weight_decay,
-        eps=args.adam_epsilon,
+
+    _, _, optimizer = train_util.get_optimizer(args, lora_layers)
+
+    #
+    # Dataloader
+    #
+    if args.dataset_class is None:
+        blueprint_generator = config_util.BlueprintGenerator(config_util.ConfigSanitizer(True, True, False, True))
+        user_config = {
+            "datasets": [
+                {
+                    "subsets": [
+                        {
+                            "image_dir": args.train_data_dir,
+                            "class_tokens": None,
+                            "num_repeats": args.dataset_repeats,
+                        }
+                    ]
+                }
+            ]
+        }
+        blueprint = blueprint_generator.generate(user_config, args)
+        train_dataset_group, _ = config_util.generate_dataset_group_by_blueprint(blueprint.dataset_group)
+    else:
+        train_dataset_group = train_util.load_arbitrary_dataset(args)
+
+    train_dataset_group.set_max_train_steps(args.max_train_steps)
+
+    collator = train_util.collator_class(0, 0, train_dataset_group)
+
+    n_workers = min(args.max_data_loader_n_workers, os.cpu_count())
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset_group,
+        batch_size=1,
+        shuffle=True,
+        collate_fn=collator,
+        num_workers=n_workers,
+        persistent_workers=args.persistent_data_loader_workers,
     )
 
-    train_dataloader = loader(**args.data_config)
+    if args.max_train_steps is None:
+        args.max_train_steps = args.max_train_epochs * len(train_dataloader)
 
-    lr_scheduler = get_scheduler(
-        args.lr_scheduler,
-        optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
-    )
+    lr_scheduler = train_util.get_scheduler_fix(args, optimizer, accelerator.num_processes)
     global_step = 0
     vae.to(accelerator.device, dtype=weight_dtype)
-    transformer, optimizer, _, lr_scheduler = accelerator.prepare(
-        transformer, optimizer, deepcopy(train_dataloader), lr_scheduler
+    transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        transformer, optimizer, train_dataloader, lr_scheduler
     )
+
+    train_util.resume_from_local_or_hf_if_specified(accelerator, args)
+
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     initial_global_step = 0
 
     if accelerator.is_main_process:
-        accelerator.init_trackers(args.tracker_project_name, {"test": None})
+        accelerator.init_trackers(args.wandb_run_name or "qwen-lora-training", {"test": None})
 
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
+    logger.info(f"  Num train images * repeats / 学習画像の数×繰り返し回数: {train_dataset_group.num_train_images}")
+    logger.info(f"  num batches per epoch / 1epochのバッチ数: {len(train_dataloader)}")
+    logger.info(f"  num epochs / epoch数: {num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
@@ -185,11 +234,12 @@ def main():
         disable=not accelerator.is_local_main_process,
     )
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
-    for epoch in range(1):
+    for epoch in range(num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(transformer):
-                img, prompts = batch
+                img = batch["images"]
+                prompts = batch["captions"]
                 with torch.no_grad():
                     pixel_values = img.to(dtype=weight_dtype).to(accelerator.device)
                     pixel_values = pixel_values.unsqueeze(2)
@@ -284,15 +334,13 @@ def main():
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
 
-                if global_step % args.checkpointing_steps == 0:
+                if global_step > 0 and global_step % args.save_every_n_steps == 0:
                     if accelerator.is_main_process:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
                             if len(checkpoints) >= args.checkpoints_total_limit:
                                 num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
                                 removing_checkpoints = checkpoints[0:num_to_remove]
@@ -306,26 +354,19 @@ def main():
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
                                     shutil.rmtree(removing_checkpoint)
 
-                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
 
-                    # accelerator.save_state(save_path)
-                    try:
-                        if not os.path.exists(save_path):
-                            os.mkdir(save_path)
-                    except:
-                        pass
-                    unwrapped_flux_transformer = unwrap_model(transformer)
-                    flux_transformer_lora_state_dict = convert_state_dict_to_diffusers(
-                        get_peft_model_state_dict(unwrapped_flux_transformer)
-                    )
+                        unwrapped_transformer = unwrap_model(transformer)
+                        lora_state_dict = convert_state_dict_to_diffusers(
+                            get_peft_model_state_dict(unwrapped_transformer)
+                        )
 
-                    QwenImagePipeline.save_lora_weights(
-                        save_path,
-                        flux_transformer_lora_state_dict,
-                        safe_serialization=True,
-                    )
-
-                    logger.info(f"Saved state to {save_path}")
+                        QwenImagePipeline.save_lora_weights(
+                            save_path,
+                            lora_state_dict,
+                            safe_serialization=True,
+                        )
+                        logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
