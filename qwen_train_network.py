@@ -4,6 +4,8 @@ from copy import deepcopy
 import logging
 import os
 import shutil
+import math
+import toml
 
 import torch
 from tqdm.auto import tqdm
@@ -26,8 +28,7 @@ from diffusers.training_utils import (
 )
 from diffusers.utils import convert_state_dict_to_diffusers
 from diffusers.utils.torch_utils import is_compiled_module
-from image_datasets.dataset import loader
-from omegaconf import OmegaConf
+from finetune.lora_dataset import setup_dataloader
 from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 import transformers
@@ -37,20 +38,55 @@ logger = get_logger(__name__, log_level="INFO")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        required=True,
-        help="path to config",
-    )
-    args = parser.parse_args()
+    parser.add_argument("--dataset_config", type=str, default=None, help="path to dataset config file")
+    parser.add_argument("--output_dir", type=str, default="output")
+    parser.add_argument("--logging_dir", type=str, default="logs")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--mixed_precision", type=str, default="no", choices=["no", "fp16", "bf16"])
+    parser.add_argument("--report_to", type=str, default="tensorboard")
+    parser.add_argument("--pretrained_model_name_or_path", type=str, required=True)
+    parser.add_argument("--rank", type=int, default=4)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--adam_beta1", type=float, default=0.9)
+    parser.add_argument("--adam_beta2", type=float, default=0.999)
+    parser.add_argument("--adam_weight_decay", type=float, default=1e-2)
+    parser.add_argument("--adam_epsilon", type=float, default=1e-8)
+    parser.add_argument("--lr_scheduler", type=str, default="constant")
+    parser.add_argument("--lr_warmup_steps", type=int, default=0)
+    parser.add_argument("--max_train_steps", type=int, default=0)
+    parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument("--tracker_project_name", type=str, default="qwen-lora")
+    parser.add_argument("--train_batch_size", type=int, default=1)
+    parser.add_argument("--checkpointing_steps", type=int, default=1000)
+    parser.add_argument("--checkpoints_total_limit", type=int, default=None)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--enable_bucket", action="store_true")
+    parser.add_argument("--min_bucket_reso", type=int, default=256)
+    parser.add_argument("--max_bucket_reso", type=int, default=1024)
+    parser.add_argument("--bucket_reso_steps", type=int, default=64)
+    parser.add_argument("--bucket_no_upscale", action="store_true")
+    parser.add_argument("--debug_dataset", action="store_true")
+    parser.add_argument("--max_data_loader_n_workers", type=int, default=0)
+    parser.add_argument("--resolution", type=str, default="512,512")
 
-    return args.config
+    args = parser.parse_args()
+    if args.resolution:
+        args.resolution = tuple(map(int, args.resolution.split(',')))
+    return args
 
 
 def main():
-    args = OmegaConf.load(parse_args())
+    args = parse_args()
+
+    if args.dataset_config:
+        config = toml.load(args.dataset_config)
+        if 'general' in config:
+             for k, v in config['general'].items():
+                 if hasattr(args, k):
+                    setattr(args, k, v)
+    else:
+        config = {}
+
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -153,7 +189,14 @@ def main():
         eps=args.adam_epsilon,
     )
 
-    train_dataloader = loader(**args.data_config)
+    train_dataloader = setup_dataloader(config, args)
+
+    if args.max_train_steps == 0:
+        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    else:
+        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+        args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -185,11 +228,12 @@ def main():
         disable=not accelerator.is_local_main_process,
     )
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
-    for epoch in range(1):
+    for epoch in range(args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(transformer):
-                img, prompts = batch
+                img = batch["images"]
+                prompts = batch["captions"]
                 with torch.no_grad():
                     pixel_values = img.to(dtype=weight_dtype).to(accelerator.device)
                     pixel_values = pixel_values.unsqueeze(2)
@@ -332,6 +376,8 @@ def main():
 
             if global_step >= args.max_train_steps:
                 break
+        if global_step >= args.max_train_steps:
+            break
 
     accelerator.wait_for_everyone()
     accelerator.end_training()
