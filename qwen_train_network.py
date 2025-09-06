@@ -34,6 +34,7 @@ from peft import LoraConfig
 from peft.utils import get_peft_model_state_dict
 import transformers
 import library.strategy_base as strategy_base
+from library import qwen_train_utils
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -287,6 +288,13 @@ def main():
         disable=not accelerator.is_local_main_process,
     )
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
+
+    # sample images before training
+    if args.sample_prompts is not None:
+        qwen_train_utils.sample_images(
+            accelerator, args, 0, 0, transformer, vae, text_encoding_pipeline
+        )
+
     for epoch in range(args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
@@ -430,11 +438,22 @@ def main():
 
                     logger.info(f"Saved state to {save_path}")
 
+                if args.sample_prompts is not None:
+                    qwen_train_utils.sample_images(
+                        accelerator, args, epoch, global_step, transformer, vae, text_encoding_pipeline
+                    )
+
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
                 break
+
+        if args.sample_prompts is not None and args.sample_every_n_epochs is not None:
+            qwen_train_utils.sample_images(
+                accelerator, args, epoch, global_step, transformer, vae, text_encoding_pipeline
+            )
+
         if global_step >= args.max_train_steps:
             break
 
