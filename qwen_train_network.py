@@ -196,7 +196,10 @@ def main():
         r=args.network_dim,
         lora_alpha=args.network_dim,
         init_lora_weights="gaussian",
-        target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        target_modules=[
+            "to_k", "to_q", "to_v", "to_out.0",  # Attention blocks
+            "ff.net.0.proj", "ff.net.2"  # Feed-Forward Network layers
+        ]
     )
     noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         args.pretrained_model_name_or_path,
