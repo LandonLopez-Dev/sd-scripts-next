@@ -59,10 +59,20 @@ def parse_args():
     parser.add_argument("--adam_beta2", type=float, default=0.999)
     parser.add_argument("--adam_weight_decay", type=float, default=0.01)
     parser.add_argument("--adam_epsilon", type=float, default=1e-8)
-    parser.add_argument("--lr_scheduler", type=str, default="constant")
+    parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default="constant",
+        help="scheduler to use for learning rate / 学習率のスケジューラ: linear, cosine, cosine_with_restarts, polynomial, constant (default), constant_with_warmup, adafactor",
+    )
     parser.add_argument("--lr_warmup_steps", type=int, default=0)
-    parser.add_argument("--max_train_steps", type=int, default=0)
-    parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument("--max_train_steps", type=int, default=1600, help="training steps / 学習ステップ数")
+    parser.add_argument(
+        "--max_train_epochs",
+        type=int,
+        default=None,
+        help="training epochs (overrides max_train_steps) / 学習エポック数（max_train_stepsを上書きします）",
+    )
     parser.add_argument("--tracker_project_name", type=str, default="qwen-lora")
     parser.add_argument("--train_batch_size", type=int, default=1)
     parser.add_argument("--save_every_n_steps", type=int, default=300)
@@ -257,10 +267,10 @@ def main():
 
     if args.max_train_steps == 0:
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        args.max_train_steps = args.max_train_epochs * num_update_steps_per_epoch
     else:
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-        args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+        args.max_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -298,7 +308,7 @@ def main():
             accelerator, args, 0, 0, transformer, vae, text_encoding_pipeline, 0
         )
 
-    for epoch in range(args.num_train_epochs):
+    for epoch in range(args.max_train_epochs):
         train_loss = 0.0
         epoch_total_loss = 0.0
         for step, batch in enumerate(train_dataloader):
