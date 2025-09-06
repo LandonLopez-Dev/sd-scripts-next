@@ -76,7 +76,8 @@ def sample_images(
     cuda_rng_state = torch.cuda.get_rng_state() if torch.cuda.is_available() else None
 
     with torch.no_grad(), accelerator.autocast():
-        for i, prompt_dict in enumerate(prompts):
+        for prompt_dict in prompts:
+            i: int = prompt_dict["enum"]
             prompt = prompt_dict.get("prompt", "")
             negative_prompt = prompt_dict.get("negative_prompt", "")
             height = prompt_dict.get("height", args.resolution[0])
@@ -102,7 +103,7 @@ def sample_images(
             ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
             num_suffix = f"e{epoch:06d}" if epoch is not None else f"{global_step:06d}"
             seed_suffix = "" if seed is None else f"_{seed}"
-            img_filename = f"{args.output_name or 'sample'}_{num_suffix}_{i:02d}_{ts_str}{seed_suffix}.png"
+            img_filename = f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{i:02d}_{ts_str}{seed_suffix}.png"
             image.save(os.path.join(save_dir, img_filename))
 
     torch.set_rng_state(rng_state)
