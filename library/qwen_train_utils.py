@@ -3,7 +3,7 @@ import os
 import time
 import torch
 from accelerate import Accelerator
-from accelerate.utils import PartialState
+from accelerate.state import PartialState
 from diffusers import QwenImagePipeline, AutoencoderKLQwenImage, QwenImageTransformer2DModel
 from PIL import Image
 import numpy as np
