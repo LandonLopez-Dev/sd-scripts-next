@@ -6,6 +6,7 @@ import os
 import shutil
 import math
 import toml
+import time
 
 import torch
 from tqdm.auto import tqdm
@@ -46,7 +47,8 @@ def parse_args():
     parser.add_argument(
         "--output_name", type=str, default=None, help="base name of trained model file / 学習後のモデルの拡張子を除くファイル名"
     )
-    parser.add_argument("--logging_dir", type=str, default="logs")
+    parser.add_argument("--logging_dir", type=str, default=None, help="enable logging and output TensorBoard log to this directory")
+    parser.add_argument("--log_prefix", type=str, default=None, help="add prefix for each log directory")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
     parser.add_argument("--log_with", type=str, default="tensorboard")
@@ -110,15 +112,17 @@ def main():
     else:
         user_config = {"datasets": []}
 
-    logging_dir = os.path.join(args.output_dir, args.logging_dir)
-
-    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    if args.logging_dir is not None:
+        log_prefix = "qwen_" if args.log_prefix is None else args.log_prefix
+        logging_dir = os.path.join(args.logging_dir, log_prefix + time.strftime("%Y%m%d%H%M%S", time.localtime()))
+    else:
+        logging_dir = None
 
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.log_with,
-        project_config=accelerator_project_config,
+        project_dir=logging_dir,
     )
 
     def unwrap_model(model):
