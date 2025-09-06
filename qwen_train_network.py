@@ -182,6 +182,9 @@ def main():
     text_encoding_pipeline = QwenImagePipeline.from_pretrained(
         args.pretrained_model_name_or_path, transformer=None, vae=None, torch_dtype=weight_dtype
     )
+    text_encoding_pipeline.text_encoder.model.visual = None
+    gc.collect()
+    torch.cuda.empty_cache()
     vae = AutoencoderKLQwenImage.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="vae",
