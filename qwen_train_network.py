@@ -394,15 +394,15 @@ def main():
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
 
-                if global_step % args.save_every_n_steps == 0:
+                if global_step > 0 and global_step % args.save_every_n_steps == 0:
                     if accelerator.is_main_process:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+                        model_name = args.output_name if args.output_name is not None else "qwen-lora"
+                        save_path = os.path.join(args.output_dir, f"{model_name}-step{global_step:08d}")
 
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                        if args.checkpoints_total_limit is not None:
+                            checkpoints = [d for d in os.listdir(args.output_dir) if d.startswith(f"{model_name}-step")]
+                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("step")[1]))
+
                             if len(checkpoints) >= args.checkpoints_total_limit:
                                 num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
                                 removing_checkpoints = checkpoints[0:num_to_remove]
@@ -413,29 +413,19 @@ def main():
                                 logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
 
                                 for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
+                                    removing_checkpoint_path = os.path.join(args.output_dir, removing_checkpoint)
+                                    shutil.rmtree(removing_checkpoint_path)
 
-                    save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        logger.info(f"saving checkpoint: {save_path}")
+                        os.makedirs(save_path, exist_ok=True)
+                        unwrapped_transformer = unwrap_model(transformer)
+                        lora_state_dict = convert_state_dict_to_diffusers(get_peft_model_state_dict(unwrapped_transformer))
 
-                    # accelerator.save_state(save_path)
-                    try:
-                        if not os.path.exists(save_path):
-                            os.mkdir(save_path)
-                    except:
-                        pass
-                    unwrapped_flux_transformer = unwrap_model(transformer)
-                    flux_transformer_lora_state_dict = convert_state_dict_to_diffusers(
-                        get_peft_model_state_dict(unwrapped_flux_transformer)
-                    )
-
-                    QwenImagePipeline.save_lora_weights(
-                        save_path,
-                        flux_transformer_lora_state_dict,
-                        safe_serialization=True,
-                    )
-
-                    logger.info(f"Saved state to {save_path}")
+                        QwenImagePipeline.save_lora_weights(
+                            save_path,
+                            transformer_lora_layers=lora_state_dict,
+                            safe_serialization=True,
+                        )
 
                 if args.sample_prompts is not None:
                     qwen_train_utils.sample_images(
