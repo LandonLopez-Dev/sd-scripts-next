@@ -395,7 +395,14 @@ def main():
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log({"train_loss": train_loss}, step=global_step)
+
+                logs_for_accelerator = {
+                    "loss/step": train_loss,
+                    "loss/current": avg_loss.item(),
+                    "lr": lr_scheduler.get_last_lr()[0],
+                }
+                accelerator.log(logs_for_accelerator, step=global_step)
+
                 train_loss = 0.0
 
                 if global_step > 0 and global_step % args.save_every_n_steps == 0:
