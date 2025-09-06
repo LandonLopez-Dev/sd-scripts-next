@@ -5,15 +5,14 @@ import logging
 import os
 import shutil
 import math
-import toml
 import time
+import gc
 
 import torch
 from tqdm.auto import tqdm
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import ProjectConfiguration
 import datasets
 import diffusers
 from diffusers import FlowMatchEulerDiscreteScheduler
@@ -49,11 +48,11 @@ def parse_args():
     )
     parser.add_argument("--logging_dir", type=str, default=None, help="enable logging and output TensorBoard log to this directory")
     parser.add_argument("--log_prefix", type=str, default=None, help="add prefix for each log directory")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
     parser.add_argument("--log_with", type=str, default="tensorboard")
     parser.add_argument("--pretrained_model_name_or_path", type=str, required=True)
     parser.add_argument("--network_dim", type=int, default=16)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--adam_beta1", type=float, default=0.9)
     parser.add_argument("--adam_beta2", type=float, default=0.999)
@@ -106,6 +105,20 @@ def parse_args():
         type=str,
         default=None,
         help="file for prompts to generate sample images / 学習中モデルのサンプル出力用プロンプトのファイル",
+    )
+
+    parser.add_argument(
+        "--noise_offset",
+        type=float,
+        default=None,
+        help="enable noise offset with this value (if enabled, around 0.1 is recommended) / Noise offsetを有効にしてこの値を設定する（有効にする場合は0.1程度を推奨）",
+    )
+    parser.add_argument(
+        "--loss_weighting_scheme",
+        type=str,
+        default="none",
+        choices=["none", "snr", "snr_trunc"],
+        help="Loss weighting scheme. 'snr_trunc' is recommended for quality improvement.",
     )
 
     args = parser.parse_args()
@@ -334,6 +347,9 @@ def main():
 
                     bsz = pixel_latents.shape[0]
                     noise = torch.randn_like(pixel_latents, device=accelerator.device, dtype=weight_dtype)
+                    if args.noise_offset and args.noise_offset > 0:
+                        # Add noise offset scaled by the standard deviation of the noise
+                        noise = noise + args.noise_offset * torch.randn_like(noise)
                     u = compute_density_for_timestep_sampling(
                         weighting_scheme="none",
                         batch_size=bsz,
@@ -381,14 +397,13 @@ def main():
                     width=noisy_model_input.shape[4] * vae_scale_factor,
                     vae_scale_factor=vae_scale_factor,
                 )
-                weighting = compute_loss_weighting_for_sd3(weighting_scheme="none", sigmas=sigmas)
+                weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.loss_weighting_scheme, sigmas=sigmas)
                 # flow-matching loss
-                target = noise - pixel_latents
+                target = (noise - pixel_latents).detach()
                 target = target.permute(0, 2, 1, 3, 4)
-                loss = torch.mean(
-                    (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1),
-                    1,
-                )
+                # Calculate per-element loss (the squared error)
+                loss_per_element = (weighting.float() * (model_pred.float() - target.float()) ** 2)
+                loss = torch.mean(loss_per_element.reshape(target.shape[0], -1), 1)
                 loss = loss.mean()
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
