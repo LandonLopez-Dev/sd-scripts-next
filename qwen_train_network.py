@@ -289,10 +289,9 @@ def main():
     )
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
 
-    # sample images before training
-    if args.sample_prompts is not None:
+    if args.sample_prompts is not None and args.sample_at_first:
         qwen_train_utils.sample_images(
-            accelerator, args, 0, 0, transformer, vae, text_encoding_pipeline
+            accelerator, args, 0, 0, transformer, vae, text_encoding_pipeline, 0
         )
 
     for epoch in range(args.num_train_epochs):
@@ -440,7 +439,14 @@ def main():
 
                 if args.sample_prompts is not None:
                     qwen_train_utils.sample_images(
-                        accelerator, args, epoch, global_step, transformer, vae, text_encoding_pipeline
+                        accelerator,
+                        args,
+                        epoch,
+                        global_step,
+                        transformer,
+                        vae,
+                        text_encoding_pipeline,
+                        num_update_steps_per_epoch,
                     )
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -448,12 +454,6 @@ def main():
 
             if global_step >= args.max_train_steps:
                 break
-
-        if args.sample_prompts is not None and args.sample_every_n_epochs is not None:
-            qwen_train_utils.sample_images(
-                accelerator, args, epoch, global_step, transformer, vae, text_encoding_pipeline
-            )
-
         if global_step >= args.max_train_steps:
             break
 

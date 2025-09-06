@@ -25,19 +25,29 @@ def sample_images(
     transformer: QwenImageTransformer2DModel,
     vae: AutoencoderKLQwenImage,
     text_encoding_pipeline: QwenImagePipeline,
+    num_update_steps_per_epoch: int,
 ):
+    if not args.sample_prompts:
+        return
+
+    sample_this_step = False
     if global_step == 0:
-        if not args.sample_at_first:
-            return
-    else:
-        if args.sample_every_n_steps is None and args.sample_every_n_epochs is None:
-            return
+        if args.sample_at_first:
+            sample_this_step = True
+    elif global_step > 0:
         if args.sample_every_n_epochs is not None:
-            if epoch is None or epoch % args.sample_every_n_epochs != 0:
-                return
-        else:
-            if global_step % args.sample_every_n_steps != 0 or epoch is not None:
-                return
+            if num_update_steps_per_epoch > 0 and global_step % num_update_steps_per_epoch == 0:
+                current_epoch = global_step // num_update_steps_per_epoch
+                if current_epoch > 0 and current_epoch % args.sample_every_n_epochs == 0:
+                    sample_this_step = True
+                    logger.info(f"Sampling for epoch {current_epoch}")
+        elif args.sample_every_n_steps is not None:
+            if global_step % args.sample_every_n_steps == 0:
+                sample_this_step = True
+                logger.info(f"Sampling for step {global_step}")
+
+    if not sample_this_step:
+        return
 
     logger.info("")
     logger.info(f"Generating sample images at step: {global_step}")
@@ -56,6 +66,7 @@ def sample_images(
     pipeline = QwenImagePipeline(
         transformer=unwrapped_transformer,
         vae=unwrapped_vae,
+        text_encoder=text_encoding_pipeline.text_encoder,
         tokenizer=text_encoding_pipeline.tokenizer,
         scheduler=text_encoding_pipeline.scheduler,
     )
