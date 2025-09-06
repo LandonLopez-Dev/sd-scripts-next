@@ -300,6 +300,7 @@ def main():
 
     for epoch in range(args.num_train_epochs):
         train_loss = 0.0
+        epoch_total_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(transformer):
                 img = batch["images"]
@@ -382,6 +383,7 @@ def main():
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
+                epoch_total_loss += avg_loss.item()
 
                 # Backpropagate
                 accelerator.backward(loss)
@@ -396,9 +398,11 @@ def main():
                 progress_bar.update(1)
                 global_step += 1
 
+                average_loss = epoch_total_loss / (step + 1)
                 logs_for_accelerator = {
                     "loss/step": train_loss,
                     "loss/current": avg_loss.item(),
+                    "loss/average": average_loss,
                     "lr": lr_scheduler.get_last_lr()[0],
                 }
                 accelerator.log(logs_for_accelerator, step=global_step)
