@@ -39,6 +39,21 @@ from library import qwen_train_utils
 logger = get_logger(__name__, log_level="INFO")
 
 
+class SimpleFlowMatchScheduler:
+    def __init__(self, num_train_timesteps: int = 1000, sigma_max: float = 1.0, sigma_min: float = 0.01):
+        self.num_train_timesteps = num_train_timesteps
+        self.sigmas = torch.linspace(sigma_max, sigma_min, num_train_timesteps)
+        self.timesteps = torch.arange(0, num_train_timesteps).flip(0)
+
+    @property
+    def config(self):
+        # Create a mock config object for compatibility
+        class MockConfig:
+            def __init__(self, num_train_timesteps):
+                self.num_train_timesteps = num_train_timesteps
+        return MockConfig(self.num_train_timesteps)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument("--dataset_config", type=str, default=None, help="path to dataset config file")
@@ -121,6 +136,10 @@ def parse_args():
         help="Loss weighting scheme. 'snr_trunc' is recommended for quality improvement.",
     )
 
+    parser.add_argument('--num_train_timesteps', type=int, default=1000)
+    parser.add_argument('--sigma_max', type=float, default=1.0)
+    parser.add_argument('--sigma_min', type=float, default=0.01)
+
     args = parser.parse_args()
     if args.resolution:
         args.resolution = tuple(map(int, args.resolution.split(',')))
@@ -196,30 +215,17 @@ def main():
         r=args.network_dim,
         lora_alpha=args.network_dim,
         init_lora_weights="gaussian",
-        target_modules=[
-            "to_k", "to_q", "to_v", "to_out.0",  # Attention blocks
-            "ff.net.0.proj", "ff.net.2"  # Feed-Forward Network layers
-        ]
+        target_modules="all-linear"
     )
-    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="scheduler",
+    noise_scheduler = SimpleFlowMatchScheduler(
+        num_train_timesteps=args.num_train_timesteps,
+        sigma_max=args.sigma_max,
+        sigma_min=args.sigma_min
     )
     transformer.to(accelerator.device, dtype=weight_dtype)
     transformer.add_adapter(lora_config)
     text_encoding_pipeline.to(accelerator.device)
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
-
-    def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
-        sigmas = noise_scheduler_copy.sigmas.to(device=accelerator.device, dtype=dtype)
-        schedule_timesteps = noise_scheduler_copy.timesteps.to(accelerator.device)
-        timesteps = timesteps.to(accelerator.device)
-        step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
-
-        sigma = sigmas[step_indices].flatten()
-        while len(sigma.shape) < n_dim:
-            sigma = sigma.unsqueeze(-1)
-        return sigma
 
     vae.requires_grad_(False)
     transformer.requires_grad_(False)
@@ -356,18 +362,12 @@ def main():
                     if args.noise_offset and args.noise_offset > 0:
                         # Add noise offset scaled by the standard deviation of the noise
                         noise = noise + args.noise_offset * torch.randn_like(noise)
-                    u = compute_density_for_timestep_sampling(
-                        weighting_scheme="none",
-                        batch_size=bsz,
-                        logit_mean=0.0,
-                        logit_std=1.0,
-                        mode_scale=1.29,
-                    )
-                    indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-                    timesteps = noise_scheduler_copy.timesteps[indices].to(device=pixel_latents.device)
+                    timesteps = torch.randint(0, noise_scheduler_copy.config.num_train_timesteps, (bsz,), device=pixel_latents.device).long()
 
-                sigmas = get_sigmas(timesteps, n_dim=pixel_latents.ndim, dtype=pixel_latents.dtype)
-                noisy_model_input = (1.0 - sigmas) * pixel_latents + sigmas * noise
+                sigmas = noise_scheduler_copy.sigmas[timesteps].to(device=pixel_latents.device, dtype=pixel_latents.dtype)
+                while len(sigmas.shape) < pixel_latents.ndim:
+                    sigmas = sigmas.unsqueeze(-1)
+                noisy_model_input = pixel_latents + sigmas * noise
                 # Concatenate across channels.
                 # pack the latents.
                 packed_noisy_model_input = QwenImagePipeline._pack_latents(
@@ -404,8 +404,8 @@ def main():
                     vae_scale_factor=vae_scale_factor,
                 )
                 weighting = compute_loss_weighting_for_sd3(weighting_scheme=args.loss_weighting_scheme, sigmas=sigmas)
-                # flow-matching loss
-                target = (noise - pixel_latents).detach()
+                # noise prediction loss
+                target = noise.detach()
                 target = target.permute(0, 2, 1, 3, 4)
                 # Calculate per-element loss (the squared error)
                 loss_per_element = (weighting.float() * (model_pred.float() - target.float()) ** 2)
