@@ -83,8 +83,8 @@ def sample_images(
             height = prompt_dict.get("height", args.resolution[0])
             width = prompt_dict.get("width", args.resolution[1])
             seed = prompt_dict.get("seed")
-            guidance_scale = prompt_dict.get("guidance_scale", 7.5)
-            num_inference_steps = prompt_dict.get("num_inference_steps", 50)
+            guidance_scale = prompt_dict.get("guidance_scale", 4.0)
+            num_inference_steps = prompt_dict.get("num_inference_steps", 25)
 
             generator = torch.Generator(device=accelerator.device).manual_seed(seed) if seed is not None else None
 
@@ -96,7 +96,7 @@ def sample_images(
                 height=height,
                 width=width,
                 num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
+                true_cfg_scale=guidance_scale,
                 generator=generator,
             ).images[0]
 
