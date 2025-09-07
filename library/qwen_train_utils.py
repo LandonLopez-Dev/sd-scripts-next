@@ -31,16 +31,18 @@ def sample_images(
         return
 
     sample_this_step = False
+    # Before training starts
     if global_step == 0:
         if args.sample_at_first:
             sample_this_step = True
-    elif global_step > 0:
+            logger.info("Sampling before training starts (step 0)")
+    else:
+        # Epoch-based sampling: use the true dataset epoch provided by the caller
         if args.sample_every_n_epochs is not None:
-            if num_update_steps_per_epoch > 0 and global_step % num_update_steps_per_epoch == 0:
-                current_epoch = global_step // num_update_steps_per_epoch
-                if current_epoch > 0 and current_epoch % args.sample_every_n_epochs == 0:
-                    sample_this_step = True
-                    logger.info(f"Sampling for epoch {current_epoch}")
+            if epoch is not None and epoch > 0 and epoch % args.sample_every_n_epochs == 0:
+                sample_this_step = True
+                logger.info(f"Sampling for epoch {epoch}")
+        # Step-based sampling (unchanged)
         elif args.sample_every_n_steps is not None:
             if global_step % args.sample_every_n_steps == 0:
                 sample_this_step = True

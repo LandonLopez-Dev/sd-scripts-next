@@ -74,7 +74,6 @@ def parse_args():
     )
     parser.add_argument("--tracker_project_name", type=str, default="qwen-lora")
     parser.add_argument("--train_batch_size", type=int, default=1)
-    parser.add_argument("--save_every_n_steps", type=int, default=300)
     parser.add_argument("--checkpoints_total_limit", type=int, default=None)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--enable_bucket", action="store_true")
@@ -85,6 +84,20 @@ def parse_args():
     parser.add_argument("--debug_dataset", action="store_true")
     parser.add_argument("--max_data_loader_n_workers", type=int, default=0)
     parser.add_argument("--resolution", type=str, default="512,512")
+
+    parser.add_argument(
+        "--save_every_n_steps",
+        type=int,
+        default=None,
+        help="save checkpoint every N steps / 学習中のモデルを指定ステップごとに保存する",
+    )
+    parser.add_argument(
+        "--save_every_n_epochs",
+        type=int,
+        default=None,
+        help="save checkpoint every N epochs / 学習中のモデルを指定エポックごとに保存する",
+    )
+
     parser.add_argument(
         "--sample_at_first", action="store_true", help="generate sample images before training / 学習前にサンプル出力する"
     )
@@ -134,6 +147,27 @@ def main():
         user_config = config_util.load_user_config(args.dataset_config)
     else:
         user_config = {"datasets": []}
+
+    # Apply selected training-related options from config's [general] if provided
+    general_cfg = user_config.get("general", {}) if isinstance(user_config, dict) else {}
+    # If user specified max_train_epochs in config, prefer epoch-based scheduling
+    if general_cfg.get("max_train_epochs") is not None:
+        args.max_train_epochs = int(general_cfg["max_train_epochs"])  # type: ignore
+        # Force step recomputation from epochs later
+        args.max_train_steps = 0
+    # Allow overriding gradient_accumulation_steps if specified in config
+    if general_cfg.get("gradient_accumulation_steps") is not None:
+        args.gradient_accumulation_steps = int(general_cfg["gradient_accumulation_steps"])  # type: ignore
+    # Allow overriding train_batch_size used for logging (dataset handles actual batching)
+    if general_cfg.get("train_batch_size") is not None:
+        args.train_batch_size = int(general_cfg["train_batch_size"])  # type: ignore
+    # Allow overriding save/sample cadence from config if provided
+    if general_cfg.get("save_every_n_steps") is not None:
+        args.save_every_n_steps = int(general_cfg["save_every_n_steps"])  # type: ignore
+    if general_cfg.get("sample_every_n_steps") is not None:
+        args.sample_every_n_steps = int(general_cfg["sample_every_n_steps"])  # type: ignore
+    if general_cfg.get("sample_every_n_epochs") is not None:
+        args.sample_every_n_epochs = int(general_cfg["sample_every_n_epochs"])  # type: ignore
 
     if args.logging_dir is not None:
         log_prefix = "qwen_" if args.log_prefix is None else args.log_prefix
@@ -196,15 +230,30 @@ def main():
         r=args.network_dim,
         lora_alpha=args.network_dim,
         init_lora_weights="gaussian",
-        target_modules=[
-            "to_k", "to_q", "to_v", "to_out.0",  # Attention blocks
-            "ff.net.0.proj", "ff.net.2"  # Feed-Forward Network layers
-        ]
+        target_modules="all-linear"
     )
-    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="scheduler",
-    )
+    # noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+    #     args.pretrained_model_name_or_path,
+    #     subfolder="scheduler",
+    # )
+    scheduler_config = {
+        "base_image_seq_len": 256,
+        "base_shift": 0.5,
+        "invert_sigmas": False,
+        "max_image_seq_len": 8192,
+        "max_shift": 0.9,
+        "num_train_timesteps": 1000,
+        "shift": 1.0,
+        "shift_terminal": 0.02,
+        "stochastic_sampling": False,
+        "time_shift_type": "exponential",
+        "use_beta_sigmas": False,
+        "use_dynamic_shifting": True,
+        "use_exponential_sigmas": False,
+        "use_karras_sigmas": False
+    }
+    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_config(scheduler_config)
+
     transformer.to(accelerator.device, dtype=weight_dtype)
     transformer.add_adapter(lora_config)
     text_encoding_pipeline.to(accelerator.device)
@@ -290,17 +339,23 @@ def main():
     else:
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         args.max_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    logger.info(f"len(train_dataloader) = {len(train_dataloader)}")
+    logger.info(f"batches_per_epoch (len(dataloader)) = {len(train_dataloader)}")
+    logger.info(f"update_steps_per_epoch (ceil(batches/accum)) = {num_update_steps_per_epoch}")
+    logger.info(f"max_train_epochs = {args.max_train_epochs}")
+    logger.info(f"max_train_steps = {args.max_train_steps}")
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=args.lr_warmup_steps,
+        num_training_steps=args.max_train_steps,
     )
     global_step = 0
     vae.to(accelerator.device, dtype=weight_dtype)
-    transformer, optimizer, _, lr_scheduler = accelerator.prepare(
-        transformer, optimizer, deepcopy(train_dataloader), lr_scheduler
+    # Prepare models, optimizer, dataloader, and scheduler with accelerator
+    transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        transformer, optimizer, train_dataloader, lr_scheduler
     )
 
     initial_global_step = 0
@@ -328,6 +383,11 @@ def main():
         )
 
     for epoch in range(args.max_train_epochs):
+        # Inform dataset group of current epoch for proper shuffling/bucket ordering
+        try:
+            train_dataset_group.set_current_epoch(epoch)
+        except Exception:
+            pass
         train_loss = 0.0
         epoch_total_loss = 0.0
         for step, batch in enumerate(train_dataloader):
