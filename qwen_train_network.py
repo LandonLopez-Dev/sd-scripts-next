@@ -30,7 +30,7 @@ from diffusers.utils import convert_state_dict_to_diffusers
 from diffusers.utils.torch_utils import is_compiled_module
 import library.config_util as config_util
 from torch.utils.data import DataLoader
-from peft import LoraConfig
+from peft import LoraConfig, LoHaConfig, LoKrConfig
 from peft.utils import get_peft_model_state_dict
 import transformers
 import library.strategy_base as strategy_base
@@ -139,6 +139,7 @@ def parse_args():
     parser.add_argument('--num_train_timesteps', type=int, default=1000)
     parser.add_argument('--sigma_max', type=float, default=1.0)
     parser.add_argument('--sigma_min', type=float, default=0.01)
+    parser.add_argument('--adapter_type', type=str, default='lora', choices=['lora', 'loha', 'lokr'])
 
     args = parser.parse_args()
     if args.resolution:
@@ -211,12 +212,28 @@ def main():
     transformer = QwenImageTransformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="transformer", )
-    lora_config = LoraConfig(
-        r=args.network_dim,
-        lora_alpha=args.network_dim,
-        init_lora_weights="gaussian",
-        target_modules="all-linear"
-    )
+
+    if args.adapter_type == 'lora':
+        lora_config = LoraConfig(
+            r=args.network_dim,
+            lora_alpha=args.network_dim,
+            init_lora_weights="gaussian",
+            target_modules="all-linear"
+        )
+    elif args.adapter_type == 'loha':
+        lora_config = LoHaConfig(
+            r=args.network_dim,
+            alpha=args.network_dim,
+            init_lora_weights="gaussian",
+            target_modules="all-linear"
+        )
+    elif args.adapter_type == 'lokr':
+        lora_config = LoKrConfig(
+            r=args.network_dim,
+            alpha=args.network_dim,
+            init_lora_weights="gaussian",
+            target_modules="all-linear"
+        )
     noise_scheduler = SimpleFlowMatchScheduler(
         num_train_timesteps=args.num_train_timesteps,
         sigma_max=args.sigma_max,
