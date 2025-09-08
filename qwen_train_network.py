@@ -333,7 +333,7 @@ def main():
         pin_memory=True,
     )
 
-    if args.max_train_steps == 0:
+    if not args.max_train_steps or args.max_train_steps == 0:
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
         args.max_train_steps = args.max_train_epochs * num_update_steps_per_epoch
     else:
@@ -344,6 +344,9 @@ def main():
     logger.info(f"update_steps_per_epoch (ceil(batches/accum)) = {num_update_steps_per_epoch}")
     logger.info(f"max_train_epochs = {args.max_train_epochs}")
     logger.info(f"max_train_steps = {args.max_train_steps}")
+
+    if not args.save_every_n_steps:
+        args.save_every_n_steps = num_update_steps_per_epoch * args.save_every_n_epochs
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
@@ -377,12 +380,17 @@ def main():
     )
     vae_scale_factor = 2 ** len(vae.temperal_downsample)
 
-    if args.sample_prompts is not None and args.sample_at_first:
-        qwen_train_utils.sample_images(
-            accelerator, args, 0, 0, transformer, vae, text_encoding_pipeline, 0
-        )
-
     for epoch in range(args.max_train_epochs):
+        if args.sample_prompts is not None:
+            qwen_train_utils.sample_images(
+                accelerator,
+                args,
+                global_step,
+                transformer,
+                vae,
+                text_encoding_pipeline,
+                epoch,
+            )
         # Inform dataset group of current epoch for proper shuffling/bucket ordering
         try:
             train_dataset_group.set_current_epoch(epoch)
@@ -537,12 +545,10 @@ def main():
                     qwen_train_utils.sample_images(
                         accelerator,
                         args,
-                        epoch,
                         global_step,
                         transformer,
                         vae,
                         text_encoding_pipeline,
-                        num_update_steps_per_epoch,
                     )
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}

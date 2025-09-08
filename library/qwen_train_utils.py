@@ -20,12 +20,11 @@ logger = logging.getLogger(__name__)
 def sample_images(
     accelerator: Accelerator,
     args: argparse.Namespace,
-    epoch: int,
     global_step: int,
     transformer: QwenImageTransformer2DModel,
     vae: AutoencoderKLQwenImage,
     text_encoding_pipeline: QwenImagePipeline,
-    num_update_steps_per_epoch: int,
+    epoch: int = None,
 ):
     if not args.sample_prompts:
         return
@@ -38,15 +37,23 @@ def sample_images(
             logger.info("Sampling before training starts (step 0)")
     else:
         # Epoch-based sampling: use the true dataset epoch provided by the caller
-        if args.sample_every_n_epochs is not None:
-            if epoch is not None and epoch > 0 and epoch % args.sample_every_n_epochs == 0:
+        if args.sample_every_n_steps is None and args.sample_every_n_epochs is None:
+            sample_this_step = False
+        elif args.sample_every_n_epochs is not None and epoch is not None:
+            # Epoch-based sampling overrides step-based. Sample only at epoch boundaries matching N.
+            # Expect caller to pass the true epoch index (starting from 0). We sample when (epoch+1) % N == 0.
+            if epoch is not None and epoch % args.sample_every_n_epochs == 0:
                 sample_this_step = True
                 logger.info(f"Sampling for epoch {epoch}")
-        # Step-based sampling (unchanged)
-        elif args.sample_every_n_steps is not None:
+            else:
+                sample_this_step = False
+        elif args.sample_every_n_steps:
+            # Step-based sampling
             if global_step % args.sample_every_n_steps == 0:
                 sample_this_step = True
                 logger.info(f"Sampling for step {global_step}")
+            else:
+                sample_this_step = False
 
     if not sample_this_step:
         return
